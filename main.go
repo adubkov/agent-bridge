@@ -108,41 +108,38 @@ func main() {
 }
 
 func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
+	// Check context cancellation before executing
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
-	task, _ := args["task"].(string)
-	task = strings.TrimSpace(task)
+	task := strings.TrimSpace(req.GetString("task", ""))
 	if task == "" {
 		return mcp.NewToolResultError("`task` is required and must be a non-empty string"), nil
 	}
 
 	timeoutSeconds := defaultTimeoutSeconds
-	if v, ok := args["timeout_seconds"].(float64); ok && v > 0 {
-		timeoutSeconds = int(v)
+	if v := req.GetInt("timeout_seconds", 0); v > 0 {
+		timeoutSeconds = v
 	}
 	if timeoutSeconds > maxTimeoutSeconds {
 		timeoutSeconds = maxTimeoutSeconds
 	}
 
-	allowTools, _ := args["allow_tools"].(bool)
+	allowTools := req.GetBool("allow_tools", false)
 
 	// sandbox defaults OFF. With --sandbox, agy confines the agent to an
 	// isolated scratch dir, so its file edits do NOT land in working_dir —
 	// useless for real project edits. Callers wanting a confined
 	// "compute but don't touch my files" run set sandbox: true explicitly.
-	sandbox := false
-	if v, ok := args["sandbox"].(bool); ok {
-		sandbox = v
-	}
+	sandbox := req.GetBool("sandbox", false)
 
-	workingDir, _ := args["working_dir"].(string)
+	workingDir := req.GetString("working_dir", "")
 
 	var addDirs []string
-	if raw, ok := args["add_dirs"].([]any); ok {
-		for _, d := range raw {
-			if s, ok := d.(string); ok && strings.TrimSpace(s) != "" {
-				addDirs = append(addDirs, s)
-			}
+	for _, d := range req.GetStringSlice("add_dirs", nil) {
+		if s := strings.TrimSpace(d); s != "" {
+			addDirs = append(addDirs, s)
 		}
 	}
 
@@ -192,6 +189,11 @@ func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		}
 	}
 
+	// If the parent context was canceled, return the cancellation error
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	if runCtx.Err() == context.DeadlineExceeded {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"gemini_agent timed out after %s (%s).\nPartial stdout:\n%s\nstderr:\n%s",
@@ -218,9 +220,16 @@ func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	return mcp.NewToolResultText(header + out), nil
 }
 
+// truncate returns a copy of s truncated to at most max bytes, without splitting UTF-8 runes.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + fmt.Sprintf("\n…(truncated, %d bytes total)", len(s))
+	// Back up to a valid UTF-8 rune boundary.
+	// Continuation bytes start with the bits 10xxxxxx, i.e., byte & 0xC0 == 0x80.
+	i := max
+	for i > 0 && (s[i]&0xC0 == 0x80) {
+		i--
+	}
+	return s[:i] + fmt.Sprintf("\n…(truncated, %d bytes total)", len(s))
 }
