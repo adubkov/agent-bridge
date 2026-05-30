@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agy-gemini-local",
+  "description": "Local marketplace for the agy-gemini plugin (Gemini/Antigravity agy CLI as an MCP tool, plus a delegation skill).",
+  "owner": {
+    "name": "Alexey Dubkov",
+    "email": "alexey@dubkov.com"
+  },
+  "plugins": [
+    {
+      "name": "agy-gemini",
+      "description": "Spawn a Gemini agent (Antigravity `agy` CLI) as an MCP tool, plus a skill teaching Claude when and how to delegate tasks to it.",
+      "author": { "name": "Alexey Dubkov" },
+      "category": "mcp",
+      "source": "./"
+    }
+  ]
+}

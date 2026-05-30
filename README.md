@@ -80,20 +80,40 @@ Or project scope via `.mcp.json` in a repo root:
 }
 ```
 
-### B) As a plugin — `make plugin-link` (tool + skill)
+### B) As a plugin — `make plugin-install` (tool + skill)
 
 This repo is also a Claude Code **plugin** (`agy-gemini`): installing it wires the
 MCP server *and* ships a skill (`skills/gemini-agent/SKILL.md`) that teaches Claude
 when and how to delegate to `gemini_agent` (and to verify its output).
 
+Claude Code discovers plugins through **marketplaces**, not by scanning a
+directory — so this repo carries a single-plugin local marketplace
+(`.claude-plugin/marketplace.json`). The target registers that marketplace and
+installs the plugin from it:
+
 ```sh
-make plugin-link    # build + symlink this repo into ~/.claude/plugins/agy-gemini
-# then restart Claude Code
+make plugin-install     # build + marketplace add (this repo) + plugin install
+# then restart Claude Code; run /plugin and /mcp to confirm
+# remove later with:
+make plugin-uninstall
 ```
+
+Equivalent manual commands:
+
+```sh
+claude plugin marketplace add "$(pwd)"
+claude plugin install agy-gemini@agy-gemini-local
+```
+
+> The marketplace records this repo's **absolute path** in your user settings, so
+> this is a local-dev install tied to your checkout location. To share it, point a
+> marketplace at the GitHub repo instead of the local path.
 
 The plugin bundles:
 
 - `.claude-plugin/plugin.json` — plugin manifest.
+- `.claude-plugin/marketplace.json` — single-plugin local marketplace
+  (`agy-gemini-local`) so `claude plugin marketplace add` can find it.
 - `.mcp.json` — registers the `agy` MCP server (`${CLAUDE_PLUGIN_ROOT}/agy-mcp`).
 - `skills/gemini-agent/SKILL.md` — guidance for Claude on delegating tasks
   (when to use it, the two modes, how to write a good `task`, and "always verify

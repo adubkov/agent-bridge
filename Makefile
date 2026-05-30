@@ -1,7 +1,10 @@
 BINARY := agy-mcp
 PKG    := github.com/adubkov/agy-mcp
 
-.PHONY: build install vet test clean smoke install-claude uninstall-claude plugin-link help
+MARKETPLACE := agy-gemini-local
+PLUGIN      := agy-gemini
+
+.PHONY: build install vet test clean smoke install-claude uninstall-claude plugin-install plugin-uninstall help
 
 ## build: compile the binary into the REPO ROOT (./agy-mcp). This is the canonical
 ##        artifact: the plugin's .mcp.json (${CLAUDE_PLUGIN_ROOT}/agy-mcp) and
@@ -43,11 +46,20 @@ uninstall-claude:
 	-claude mcp remove agy --scope user
 	@echo "removed 'agy' MCP server registration."
 
-## plugin-link: symlink this repo into the Claude Code plugins dir (registers MCP + skill)
-plugin-link: build
-	mkdir -p $(HOME)/.claude/plugins
-	ln -sfn $(CURDIR) $(HOME)/.claude/plugins/agy-gemini
-	@echo "linked $(CURDIR) -> ~/.claude/plugins/agy-gemini (restart Claude Code to load)"
+## plugin-install: register this repo as a local marketplace and install the plugin
+##                  (loads BOTH the gemini-agent skill and the agy MCP server).
+##                  Requires .claude-plugin/marketplace.json. Restart Claude Code after.
+plugin-install: build
+	-claude plugin marketplace remove $(MARKETPLACE)
+	claude plugin marketplace add $(CURDIR)
+	claude plugin install $(PLUGIN)@$(MARKETPLACE)
+	@echo "installed $(PLUGIN)@$(MARKETPLACE) (skill: gemini-agent, MCP: agy). Restart Claude Code, then /mcp + /plugin to confirm."
+
+## plugin-uninstall: remove the plugin and its local marketplace
+plugin-uninstall:
+	-claude plugin uninstall $(PLUGIN)@$(MARKETPLACE)
+	-claude plugin marketplace remove $(MARKETPLACE)
+	@echo "removed $(PLUGIN) and marketplace $(MARKETPLACE)."
 
 ## clean: remove the built binary
 clean:
