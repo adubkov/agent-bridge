@@ -3,11 +3,15 @@ PKG    := github.com/adubkov/agy-mcp
 
 .PHONY: build install vet test clean smoke install-claude uninstall-claude plugin-link help
 
-## build: compile the MCP server binary into the repo root (referenced by .mcp.json)
+## build: compile the binary into the REPO ROOT (./agy-mcp). This is the canonical
+##        artifact: the plugin's .mcp.json (${CLAUDE_PLUGIN_ROOT}/agy-mcp) and
+##        `make install-claude` ($(CURDIR)/agy-mcp) both reference it.
 build:
 	go build -o $(BINARY) .
 
-## install: go install the binary into $GOBIN / $GOPATH/bin
+## install: OPTIONAL — `go install` to $GOBIN/$GOPATH/bin for standalone PATH use.
+##          NOT used by the plugin or install-claude (those use the repo-dir binary
+##          from `make build`). Only needed if you want `agy-mcp` on your PATH.
 install:
 	go install .
 
