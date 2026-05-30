@@ -140,9 +140,13 @@ func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		}
 	}
 
-	// Build the agy invocation.
+	// Build the agy invocation. CRITICAL: `--print` takes the prompt as its
+	// VALUE — the task must come immediately after it, with all other flags
+	// AFTER the prompt. (agy usage: `agy --print "<prompt>" --print-timeout 10m`.)
+	// Putting --print-timeout between --print and the task makes agy treat
+	// "--print-timeout" as the prompt.
 	cmdArgs := []string{
-		"--print",
+		"--print", task,
 		"--print-timeout", fmt.Sprintf("%ds", timeoutSeconds),
 	}
 	for _, d := range addDirs {
@@ -154,7 +158,6 @@ func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if sandbox {
 		cmdArgs = append(cmdArgs, "--sandbox")
 	}
-	cmdArgs = append(cmdArgs, task) // positional prompt
 
 	// Give the process a little headroom beyond agy's own print-timeout so we
 	// surface agy's timeout message rather than killing it first.

@@ -20,11 +20,13 @@ test:
 	go test ./...
 
 ## smoke: build + drive the stdio server through initialize + a reason-only tools/call
+##        (runs agy in a clean temp dir so it doesn't scan this repo; needs agy authed)
 smoke: build
+	@mkdir -p /tmp/agy-mcp-smoke
 	@printf '%s\n' \
 	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gemini_agent","arguments":{"task":"Reply with exactly the word: PONG","timeout_seconds":60}}}' \
+	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gemini_agent","arguments":{"task":"Reply with exactly the word: PONG","working_dir":"/tmp/agy-mcp-smoke","timeout_seconds":120}}}' \
 	| ./$(BINARY) | grep -q PONG && echo "smoke OK" || (echo "smoke FAILED"; exit 1)
 
 ## plugin-link: symlink this repo into the Claude Code plugins dir for local use
