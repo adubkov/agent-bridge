@@ -1,7 +1,7 @@
 BINARY := agy-mcp
 PKG    := github.com/adubkov/agy-mcp
 
-.PHONY: build install vet test clean smoke plugin-link help
+.PHONY: build install vet test clean smoke install-claude uninstall-claude plugin-link help
 
 ## build: compile the MCP server binary into the repo root (referenced by .mcp.json)
 build:
@@ -29,7 +29,17 @@ smoke: build
 	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gemini_agent","arguments":{"task":"Reply with exactly the word: PONG","working_dir":"/tmp/agy-mcp-smoke","timeout_seconds":120}}}' \
 	| ./$(BINARY) | grep -q PONG && echo "smoke OK" || (echo "smoke FAILED"; exit 1)
 
-## plugin-link: symlink this repo into the Claude Code plugins dir for local use
+## install-claude: register the MCP server with Claude Code (user scope) via `claude mcp add`
+install-claude: build
+	claude mcp add agy --scope user -- $(CURDIR)/$(BINARY)
+	@echo "registered 'agy' MCP server (tool: gemini_agent). Restart Claude Code, then /mcp to confirm."
+
+## uninstall-claude: remove the MCP server registration from Claude Code
+uninstall-claude:
+	-claude mcp remove agy --scope user
+	@echo "removed 'agy' MCP server registration."
+
+## plugin-link: symlink this repo into the Claude Code plugins dir (registers MCP + skill)
 plugin-link: build
 	mkdir -p $(HOME)/.claude/plugins
 	ln -sfn $(CURDIR) $(HOME)/.claude/plugins/agy-gemini

@@ -14,21 +14,23 @@ In effect: a **spawned Gemini sub-agent callable from inside another agent**.
 | `add_dirs` | string[] | — | Directories to add to the agent's workspace (absolute paths). |
 | `working_dir` | string | server cwd | Directory the agent runs in. |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
-| `allow_tools` | bool | **false** | Let the agent take actions (edit files / run commands) by auto-approving its permission prompts (`--dangerously-skip-permissions`). |
-| `sandbox` | bool | `allow_tools` | Run with terminal/sandbox restrictions (`--sandbox`). Defaults on when `allow_tools` is on. |
+| `allow_tools` | bool | **false** | Let the agent edit files in `working_dir` / run commands by auto-approving its permission prompts (`--dangerously-skip-permissions`). |
+| `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. |
 
 ### Safety model
 
 By default the spawned agent is **reason/answer only** — it runs `agy --print`
 with no permission bypass, so it can analyze, draft, and answer but cannot take
 unattended actions. To let it actually act on your files/system, the caller must
-explicitly pass `allow_tools: true`, which:
+explicitly pass `allow_tools: true`, which passes `--dangerously-skip-permissions`
+(Gemini's approval gates are off — this is unattended execution). Scope it with
+`working_dir`; the agent's edits land there.
 
-- passes `--dangerously-skip-permissions` (Gemini's approval gates are off — this
-  is unattended execution), and
-- runs inside `--sandbox` by default (override with `sandbox: false`).
+`--sandbox` is **off by default**: with it on, agy confines the agent to an
+isolated scratch dir, so edits would *not* reach `working_dir`. Set
+`sandbox: true` only for a confined "compute but don't touch my files" run.
 
-The tool result header always reports whether tool-use was enabled.
+The tool result header always reports which mode ran.
 
 ## Build
 
@@ -41,12 +43,28 @@ go install github.com/adubkov/agy-mcp@latest
 Requires `agy` on `PATH` (or set `AGY_BIN=/path/to/agy`). The server falls back
 to `~/.local/bin/agy`.
 
-## Register with Claude Code
+## Install into Claude Code
 
-User scope (available in every project):
+Two ways — pick one. **Either way, requires `agy` authenticated** (`agy` login
+once) and on `PATH` (or set `AGY_BIN`; the server also falls back to
+`~/.local/bin/agy`). Restart Claude Code afterward (MCP loads at session start);
+run `/mcp` to confirm the `agy` server is connected. The tool appears as
+`gemini_agent`.
+
+### A) MCP server only — `make install-claude` (simplest)
+
+Registers just the tool (user scope, available in every project):
 
 ```sh
-claude mcp add agy --scope user -- /Users/adubkov/Development/go/src/github.com/adubkov/agy-mcp/agy-mcp
+make install-claude     # build + `claude mcp add agy --scope user -- <binary>`
+# remove later with:
+make uninstall-claude
+```
+
+Equivalent manual command:
+
+```sh
+claude mcp add agy --scope user -- "$(pwd)/agy-mcp"
 ```
 
 Or project scope via `.mcp.json` in a repo root:
@@ -55,25 +73,21 @@ Or project scope via `.mcp.json` in a repo root:
 {
   "mcpServers": {
     "agy": {
-      "command": "/Users/adubkov/Development/go/src/github.com/adubkov/agy-mcp/agy-mcp",
-      "env": { "AGY_BIN": "/Users/adubkov/.local/bin/agy" }
+      "command": "/absolute/path/to/agy-mcp/agy-mcp",
+      "env": { "AGY_BIN": "/Users/you/.local/bin/agy" }
     }
   }
 }
 ```
 
-Restart Claude Code (MCP servers load at session start). The tool then appears as
-`gemini_agent`.
-
-## Install as a Claude Code plugin (recommended)
+### B) As a plugin — `make plugin-link` (tool + skill)
 
 This repo is also a Claude Code **plugin** (`agy-gemini`): installing it wires the
 MCP server *and* ships a skill (`skills/gemini-agent/SKILL.md`) that teaches Claude
-when and how to delegate to `gemini_agent`.
+when and how to delegate to `gemini_agent` (and to verify its output).
 
 ```sh
-make build         # produce the agy-mcp binary the plugin's .mcp.json references
-make plugin-link   # symlink this repo into ~/.claude/plugins/agy-gemini
+make plugin-link    # build + symlink this repo into ~/.claude/plugins/agy-gemini
 # then restart Claude Code
 ```
 

@@ -35,19 +35,20 @@ review/verification of whatever Gemini produces (always verify its output).
 | `working_dir` | Absolute path the agent runs in (set this for file work). |
 | `add_dirs` | Extra workspace dirs for context. |
 | `timeout_seconds` | Default 300, max 1800. Raise for big tasks. |
-| `allow_tools` | **false by default** (reason/answer only). Set **true** to let it edit files / run commands (auto-approves its permission prompts). |
-| `sandbox` | Terminal restrictions; defaults on when `allow_tools` is true. |
+| `allow_tools` | **false by default** (reason/answer only). Set **true** to let it edit files in `working_dir` / run commands (auto-approves its permission prompts). |
+| `sandbox` | **false by default.** When true, agy confines the agent to an isolated scratch dir, so its edits do NOT reach `working_dir` — only for a "compute but don't touch my files" run. Leave it off for real edits. |
 
 ### Two modes
 
 1. **Reason/answer (default, `allow_tools` omitted)** — safe. Gemini analyzes
    and returns text; it cannot touch the filesystem unattended. Use for
    analysis, drafts-as-text, second opinions.
-2. **Acting (`allow_tools: true`)** — Gemini edits files / runs commands in
-   `working_dir` with its permission gates off. Use for the mechanical-edit
-   cases. **Always pass `working_dir` so it's scoped, and verify the result
-   afterward** (read the diff / run the build/tests yourself). The tool result
-   header reports which mode ran.
+2. **Acting (`allow_tools: true`, `sandbox` left off)** — Gemini edits files /
+   runs commands in `working_dir` with its permission gates off. Use for the
+   mechanical-edit cases. **Always pass `working_dir` so it's scoped, leave
+   `sandbox` off (or its edits go to a throwaway scratch dir), and verify the
+   result afterward** (read the diff / run the build/tests yourself). The tool
+   result header reports which mode ran.
 
 ## Writing a good `task`
 

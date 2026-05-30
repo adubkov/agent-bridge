@@ -9,10 +9,12 @@
 // Safety: tool-use (Gemini editing files / running commands) is DISABLED by
 // default. In the default mode the server runs `agy --print` with no
 // permission-bypass, so Gemini can reason/answer but cannot take unattended
-// actions. To let the spawned agent actually act, the caller must explicitly
-// set `allow_tools: true` — which passes `--dangerously-skip-permissions` and
-// (unless overridden) runs inside `--sandbox`. The tool result always reports
-// when tool-use was enabled.
+// actions. To let the spawned agent actually edit files in working_dir, the
+// caller sets `allow_tools: true` (passes --dangerously-skip-permissions);
+// scope it with `working_dir`. The `--sandbox` flag is OFF by default because
+// it confines edits to an isolated scratch dir (set `sandbox: true` only for a
+// confined "compute but don't touch my files" run). The tool result header
+// always reports which mode ran.
 package main
 
 import (
@@ -86,13 +88,14 @@ func main() {
 			mcp.Description(fmt.Sprintf("Max seconds to wait for the agent (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)),
 		),
 		mcp.WithBoolean("allow_tools",
-			mcp.Description("Allow the spawned agent to take actions (edit files, run commands) by auto-approving its "+
-				"permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer only). "+
-				"Use with care — this is unattended execution."),
+			mcp.Description("Allow the spawned agent to take actions (edit files in working_dir, run commands) by "+
+				"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false "+
+				"(reason/answer only). Use with care — this is unattended execution; scope it with working_dir."),
 		),
 		mcp.WithBoolean("sandbox",
-			mcp.Description("Run the agent with terminal/sandbox restrictions (--sandbox). Defaults to true when "+
-				"allow_tools is true, false otherwise."),
+			mcp.Description("Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). "+
+				"Default false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — "+
+				"use only for a confined 'compute but don't touch my files' run."),
 		),
 	)
 
@@ -123,8 +126,11 @@ func handleGeminiAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 
 	allowTools, _ := args["allow_tools"].(bool)
 
-	// sandbox defaults to allowTools (restrict by default when the agent can act).
-	sandbox := allowTools
+	// sandbox defaults OFF. With --sandbox, agy confines the agent to an
+	// isolated scratch dir, so its file edits do NOT land in working_dir —
+	// useless for real project edits. Callers wanting a confined
+	// "compute but don't touch my files" run set sandbox: true explicitly.
+	sandbox := false
 	if v, ok := args["sandbox"].(bool); ok {
 		sandbox = v
 	}
