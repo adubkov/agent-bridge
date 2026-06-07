@@ -1,7 +1,9 @@
-# agent-bridge-mcp
+# agent-bridge
 
-> A bidirectional **Claude ↔ Gemini** agent bridge over MCP — exposes each coding-agent
-> CLI as a spawnable sub-agent tool. _(Formerly `agy-mcp` / `agy-gemini`.)_
+> A bridge between coding agents — expose each agent's CLI as a spawnable
+> sub-agent tool. Today it ships an MCP server (the `agent-bridge-mcp` binary,
+> under [`cmd/agent-bridge-mcp`](cmd/agent-bridge-mcp)) with bidirectional
+> **Claude ↔ Gemini** delegation. _(Formerly `agy-mcp` / `agy-gemini`.)_
 
 A tiny [MCP](https://modelcontextprotocol.io) server that bridges two coding
 agents in **both directions**, exposing each as a spawnable sub-agent tool. One
@@ -97,9 +99,9 @@ delegation chains. Invalid/missing values fall back to the defaults above.
 ## Build
 
 ```sh
-go build -o agent-bridge-mcp .          # local binary
+go build -o agent-bridge-mcp ./cmd/agent-bridge-mcp          # local binary
 # or
-go install github.com/adubkov/agent-bridge-mcp@latest
+go install github.com/adubkov/agent-bridge/cmd/agent-bridge-mcp@latest
 ```
 
 Each tool requires its CLI:
