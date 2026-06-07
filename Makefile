@@ -79,9 +79,16 @@ plugin-uninstall:
 
 ## install-agy: register this repo's plugin with the Antigravity `agy` CLI, then
 ##              repoint the imported MCP server at the absolute repo binary. agy
-##              copies the plugin MANIFESTS but NOT the built binary, and does not
-##              expand Claude's ${CLAUDE_PLUGIN_ROOT}, so the imported
-##              mcp_config.json must use an absolute command path. Restart Antigravity.
+##              copies the plugin MANIFESTS but NOT the built binary, and its
+##              binary has no ${CLAUDE_PLUGIN_ROOT} support at all (confirmed via
+##              `strings`), so the imported mcp_config.json MUST use an absolute
+##              command path. We point at the live repo binary ($(CURDIR)/$(BINARY))
+##              rather than copying it into agy's dir: a copy would be a stale
+##              snapshot needing re-install on every `make build`, whereas the
+##              reference picks up rebuilds automatically (and matches how
+##              install-claude registers the same canonical binary). The trade-off
+##              is that the registration is tied to this checkout's location.
+##              Restart Antigravity after.
 install-agy: build
 	agy plugin install $(CURDIR)
 	@cfg='$(AGY_PLUGIN_DIR)/mcp_config.json'; \
