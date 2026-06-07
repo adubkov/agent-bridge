@@ -166,22 +166,22 @@ func TestBuildClaudeArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildClaudeArgs(tt.in)
+			got := claudeBackend.buildArgs(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("buildClaudeArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
+				t.Errorf("claudeBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
 			// claude must NEVER emit --sandbox or --print-timeout.
 			for _, a := range got {
 				if a == "--sandbox" {
-					t.Errorf("buildClaudeArgs emitted --sandbox: %#v", got)
+					t.Errorf("claudeBackend.buildArgs emitted --sandbox: %#v", got)
 				}
 				if a == "--print-timeout" {
-					t.Errorf("buildClaudeArgs emitted --print-timeout: %#v", got)
+					t.Errorf("claudeBackend.buildArgs emitted --print-timeout: %#v", got)
 				}
 			}
 			// --print must be first and the task its immediate value.
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
-				t.Errorf("buildClaudeArgs must start with --print <task>; got %#v", got)
+				t.Errorf("claudeBackend.buildArgs must start with --print <task>; got %#v", got)
 			}
 		})
 	}
@@ -246,14 +246,14 @@ func TestBuildGeminiArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildGeminiArgs(tt.in)
+			got := geminiBackend.buildArgs(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("buildGeminiArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
+				t.Errorf("geminiBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
 			// --print must be first and the task its immediate value (so --print-timeout
 			// never lands between --print and the task).
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
-				t.Errorf("buildGeminiArgs must start with --print <task>; got %#v", got)
+				t.Errorf("geminiBackend.buildArgs must start with --print <task>; got %#v", got)
 			}
 		})
 	}
@@ -398,70 +398,70 @@ func TestChildHopEnv(t *testing.T) {
 	}
 }
 
-func TestResolveAgyBinary(t *testing.T) {
+func TestResolveBinAgyEnvOverride(t *testing.T) {
 	// AGY_BIN override takes top priority and is reachable without network.
 	t.Setenv("AGY_BIN", "/custom/path/to/agy")
-	if got := resolveAgyBinary(); got != "/custom/path/to/agy" {
-		t.Errorf("resolveAgyBinary() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
+	if got := geminiBackend.resolveBin(); got != "/custom/path/to/agy" {
+		t.Errorf("geminiBackend.resolveBin() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
 	}
 
 	// Whitespace-only override is treated as unset (falls through to lookup/fallback,
 	// which must never be the override value).
 	t.Setenv("AGY_BIN", "   ")
-	if got := resolveAgyBinary(); got == "   " {
-		t.Errorf("resolveAgyBinary() treated whitespace AGY_BIN as a path: %q", got)
+	if got := geminiBackend.resolveBin(); got == "   " {
+		t.Errorf("geminiBackend.resolveBin() treated whitespace AGY_BIN as a path: %q", got)
 	}
 }
 
-func TestResolveClaudeBinary(t *testing.T) {
+func TestResolveBinClaudeEnvOverride(t *testing.T) {
 	// CLAUDE_BIN override takes top priority and is reachable without network.
 	t.Setenv("CLAUDE_BIN", "/custom/path/to/claude")
-	if got := resolveClaudeBinary(); got != "/custom/path/to/claude" {
-		t.Errorf("resolveClaudeBinary() with CLAUDE_BIN set = %q; want %q", got, "/custom/path/to/claude")
+	if got := claudeBackend.resolveBin(); got != "/custom/path/to/claude" {
+		t.Errorf("claudeBackend.resolveBin() with CLAUDE_BIN set = %q; want %q", got, "/custom/path/to/claude")
 	}
 
 	// Whitespace-only override is treated as unset (falls through to lookup/fallback,
 	// which must never be the override value).
 	t.Setenv("CLAUDE_BIN", "   ")
-	if got := resolveClaudeBinary(); got == "   " {
-		t.Errorf("resolveClaudeBinary() treated whitespace CLAUDE_BIN as a path: %q", got)
+	if got := claudeBackend.resolveBin(); got == "   " {
+		t.Errorf("claudeBackend.resolveBin() treated whitespace CLAUDE_BIN as a path: %q", got)
 	}
 }
 
 func TestModeNotes(t *testing.T) {
 	tests := []struct {
 		name string
-		note func(runOpts) string
+		b    backend
 		in   runOpts
 		want string
 	}{
 		{
 			name: "gemini reason-only",
-			note: geminiModeNote,
+			b:    geminiBackend,
 			in:   runOpts{},
 			want: "tool-use: disabled (reason/answer only)",
 		},
 		{
 			name: "gemini allow_tools without sandbox",
-			note: geminiModeNote,
+			b:    geminiBackend,
 			in:   runOpts{allowTools: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions)",
 		},
 		{
 			name: "gemini allow_tools with sandbox",
-			note: geminiModeNote,
+			b:    geminiBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions) in --sandbox",
 		},
 		{
 			name: "claude reason-only",
-			note: claudeModeNote,
+			b:    claudeBackend,
 			in:   runOpts{},
 			want: "tool-use: disabled (reason/answer only)",
 		},
 		{
 			name: "claude allow_tools (sandbox ignored)",
-			note: claudeModeNote,
+			b:    claudeBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions)",
 		},
@@ -469,7 +469,7 @@ func TestModeNotes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.note(tt.in); got != tt.want {
+			if got := tt.b.modeNote(tt.in); got != tt.want {
 				t.Errorf("modeNote(%+v) = %q; want %q", tt.in, got, tt.want)
 			}
 		})
@@ -478,10 +478,9 @@ func TestModeNotes(t *testing.T) {
 
 // --- runAgent integration tests ---------------------------------------------
 //
-// runAgent is the shared run path for both tools. Because backend.resolveBin is
-// a function field, these tests point it at a fake executable and drive the real
-// gemini/claude backends (real tool, cliName, buildArgs, modeNote) end-to-end —
-// no actual agy/claude CLI is spawned.
+// runAgent is the shared run path for both tools. These tests inject a fake
+// executable via the backend's real binEnv override (see withBin) and drive the
+// real gemini/claude backends end-to-end — no actual agy/claude CLI is spawned.
 
 // writeFakeBin writes an executable shell script to a temp dir and returns its path.
 func writeFakeBin(t *testing.T, script string) string {
@@ -493,9 +492,13 @@ func writeFakeBin(t *testing.T, script string) string {
 	return p
 }
 
-// withBin returns a copy of b whose resolveBin yields the given path.
-func withBin(b backend, path string) backend {
-	b.resolveBin = func() string { return path }
+// withBin points the backend's CLI at the given path using its real binEnv
+// override (the same seam a user would use), leaving cliName intact so result
+// text (e.g. the "(<cli> returned no stdout)" note) still reports the CLI name.
+// t.Setenv restores the env after the test.
+func withBin(t *testing.T, b backend, path string) backend {
+	t.Helper()
+	t.Setenv(b.binEnv, path)
 	return b
 }
 
@@ -521,7 +524,7 @@ func TestRunAgentHopLimit(t *testing.T) {
 			t.Setenv(hopDepthEnv, "2")
 			t.Setenv(hopMaxEnv, "2")
 			// resolveBin points at a path that would fail loudly if ever executed.
-			tb := withBin(base, "/nonexistent/should-not-run")
+			tb := withBin(t, base, "/nonexistent/should-not-run")
 
 			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
 			if err != nil {
@@ -605,7 +608,7 @@ func TestRunAgentOutcomes(t *testing.T) {
 	for _, tt := range tests {
 		for _, base := range []backend{geminiBackend, claudeBackend} {
 			t.Run(tt.name+"/"+base.tool, func(t *testing.T) {
-				tb := withBin(base, writeFakeBin(t, tt.script))
+				tb := withBin(t, base, writeFakeBin(t, tt.script))
 				res, err := runAgent(context.Background(), tb, runOpts{task: "do it", timeoutSeconds: 300})
 				tt.check(t, tb, res, err)
 			})
@@ -623,7 +626,7 @@ func TestRunAgentParentCancel(t *testing.T) {
 		t.Run(base.tool, func(t *testing.T) {
 			// `exec` so the killed process IS the sleep (no orphaned grandchild
 			// holding the stdout pipe open past the cancellation).
-			tb := withBin(base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
+			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
@@ -647,7 +650,7 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 
 	for _, base := range []backend{geminiBackend, claudeBackend} {
 		t.Run(base.tool, func(t *testing.T) {
-			tb := withBin(base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
+			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
 			// Shrink the per-backend headroom (no global mutation) so the hard
 			// deadline fires quickly. timeoutSeconds 0 => hardDeadline ==
 			// timeoutHeadroom (80ms). Parent ctx has no deadline, so the
@@ -677,7 +680,7 @@ func TestRunAgentKillsGrandchild(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 
 	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
-	tb := withBin(geminiBackend, bin)
+	tb := withBin(t, geminiBackend, bin)
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 
 	type out struct {
@@ -756,15 +759,15 @@ func TestMakeHandlerParsing(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 	echo := writeFakeBin(t, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
 
-	call := func(b backend, supportsSandbox bool, args map[string]any) (*mcp.CallToolResult, error) {
-		h := makeHandler(withBin(b, echo), supportsSandbox)
+	call := func(t *testing.T, b backend, args map[string]any) (*mcp.CallToolResult, error) {
+		h := makeHandler(withBin(t, b, echo))
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: b.tool, Arguments: args}}
 		return h(context.Background(), req)
 	}
 
 	t.Run("empty/whitespace task is rejected before spawning", func(t *testing.T) {
 		for _, b := range []backend{geminiBackend, claudeBackend} {
-			res, err := call(b, true, map[string]any{"task": "   "})
+			res, err := call(t, b, map[string]any{"task": "   "})
 			if err != nil {
 				t.Fatalf("[%s] unexpected Go error: %v", b.tool, err)
 			}
@@ -790,7 +793,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 			{"in range -> kept", map[string]any{"task": "x", "timeout_seconds": 600}, "600s"},
 		}
 		for _, c := range cases {
-			res, _ := call(geminiBackend, true, c.args)
+			res, _ := call(t, geminiBackend, c.args)
 			if a := handlerEchoArgs(t, res); !argsHave(a, "--print-timeout", c.want) {
 				t.Errorf("%s: want --print-timeout %s; args=%v", c.name, c.want, a)
 			}
@@ -798,19 +801,19 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("sandbox gated to gemini only", func(t *testing.T) {
-		res, _ := call(geminiBackend, true, map[string]any{"task": "x", "sandbox": true})
+		res, _ := call(t, geminiBackend, map[string]any{"task": "x", "sandbox": true})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--sandbox") {
 			t.Errorf("gemini should pass --sandbox; args=%v", a)
 		}
-		// claude is registered with supportsSandbox=false: the param is never read.
-		res, _ = call(claudeBackend, false, map[string]any{"task": "x", "sandbox": true})
+		// claude has no sandboxFlag, so b.supportsSandbox() is false and it's never read.
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "sandbox": true})
 		if a := handlerEchoArgs(t, res); argsContain(a, "--sandbox") {
 			t.Errorf("claude must never pass --sandbox; args=%v", a)
 		}
 	})
 
 	t.Run("add_dirs trimmed and empties dropped", func(t *testing.T) {
-		res, _ := call(geminiBackend, true, map[string]any{
+		res, _ := call(t, geminiBackend, map[string]any{
 			"task":     "x",
 			"add_dirs": []any{"/a", "  ", "", " /b "},
 		})
@@ -824,18 +827,18 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("model trimmed; blank dropped", func(t *testing.T) {
-		res, _ := call(claudeBackend, false, map[string]any{"task": "x", "model": "  opus  "})
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "model": "  opus  "})
 		if a := handlerEchoArgs(t, res); !argsHave(a, "--model", "opus") {
 			t.Errorf("model should be trimmed to opus; args=%v", a)
 		}
-		res, _ = call(claudeBackend, false, map[string]any{"task": "x", "model": "   "})
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "model": "   "})
 		if a := handlerEchoArgs(t, res); argsContain(a, "--model") {
 			t.Errorf("blank model must be dropped; args=%v", a)
 		}
 	})
 
 	t.Run("allow_tools adds skip-permissions", func(t *testing.T) {
-		res, _ := call(claudeBackend, false, map[string]any{"task": "x", "allow_tools": true})
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "allow_tools": true})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("allow_tools should pass the skip flag; args=%v", a)
 		}
@@ -845,7 +848,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		dir := t.TempDir()
 		// The fake writes a marker into its cwd; if working_dir applied, it lands in dir.
 		marker := writeFakeBin(t, "#!/bin/sh\ntouch cwd-marker\n")
-		h := makeHandler(withBin(geminiBackend, marker), true)
+		h := makeHandler(withBin(t, geminiBackend, marker))
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{
 			Name:      geminiBackend.tool,
 			Arguments: map[string]any{"task": "x", "working_dir": dir},
@@ -862,7 +865,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		for _, b := range []backend{geminiBackend, claudeBackend} {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			h := makeHandler(withBin(b, echo), true)
+			h := makeHandler(withBin(t, b, echo))
 			req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: b.tool, Arguments: map[string]any{"task": "x"}}}
 			res, err := h(ctx, req)
 			if err == nil {
@@ -891,45 +894,35 @@ func writeExec(t *testing.T, dir, name string) string {
 }
 
 func TestResolveBinaryFallbacks(t *testing.T) {
-	backends := []struct {
-		name    string
-		envKey  string
-		binName string
-		resolve func() string
-	}{
-		{"agy", "AGY_BIN", "agy", resolveAgyBinary},
-		{"claude", "CLAUDE_BIN", "claude", resolveClaudeBinary},
-	}
-
-	for _, b := range backends {
-		t.Run(b.name, func(t *testing.T) {
+	for _, b := range []backend{geminiBackend, claudeBackend} {
+		t.Run(b.cliName, func(t *testing.T) {
 			t.Run("found on PATH via LookPath", func(t *testing.T) {
-				t.Setenv(b.envKey, "")
+				t.Setenv(b.binEnv, "")
 				dir := t.TempDir()
-				want := writeExec(t, dir, b.binName)
+				want := writeExec(t, dir, b.cliName)
 				t.Setenv("PATH", dir)
-				if got := b.resolve(); got != want {
-					t.Errorf("resolve() = %q; want PATH hit %q", got, want)
+				if got := b.resolveBin(); got != want {
+					t.Errorf("resolveBin() = %q; want PATH hit %q", got, want)
 				}
 			})
 
 			t.Run("falls back to ~/.local/bin", func(t *testing.T) {
-				t.Setenv(b.envKey, "")
+				t.Setenv(b.binEnv, "")
 				t.Setenv("PATH", t.TempDir()) // a dir without the binary
 				home := t.TempDir()
 				t.Setenv("HOME", home)
-				want := writeExec(t, filepath.Join(home, ".local", "bin"), b.binName)
-				if got := b.resolve(); got != want {
-					t.Errorf("resolve() = %q; want ~/.local/bin fallback %q", got, want)
+				want := writeExec(t, filepath.Join(home, ".local", "bin"), b.cliName)
+				if got := b.resolveBin(); got != want {
+					t.Errorf("resolveBin() = %q; want ~/.local/bin fallback %q", got, want)
 				}
 			})
 
 			t.Run("falls back to bare name", func(t *testing.T) {
-				t.Setenv(b.envKey, "")
+				t.Setenv(b.binEnv, "")
 				t.Setenv("PATH", t.TempDir())
 				t.Setenv("HOME", t.TempDir()) // no .local/bin/<bin>
-				if got := b.resolve(); got != b.binName {
-					t.Errorf("resolve() = %q; want bare name %q", got, b.binName)
+				if got := b.resolveBin(); got != b.cliName {
+					t.Errorf("resolveBin() = %q; want bare name %q", got, b.cliName)
 				}
 			})
 		})
@@ -952,8 +945,8 @@ func TestBackendTimeoutHeadroom(t *testing.T) {
 // schemas: both expose the shared params; only gemini exposes `sandbox`; and the
 // gemini description does NOT claim acting mode is sandboxed by default.
 func TestToolSchemas(t *testing.T) {
-	gemini := newGeminiTool()
-	claude := newClaudeTool()
+	gemini := newTool(geminiBackend)
+	claude := newTool(claudeBackend)
 
 	if gemini.Name != "gemini_agent" {
 		t.Errorf("gemini tool name = %q; want gemini_agent", gemini.Name)
@@ -987,5 +980,43 @@ func TestToolSchemas(t *testing.T) {
 	}
 	if !strings.Contains(gemini.Description, "OFF by default") {
 		t.Errorf("gemini description should state sandboxing is OFF by default: %q", gemini.Description)
+	}
+}
+
+// TestBackendRegistry validates invariants across every registry entry, so a
+// malformed new backend is caught here rather than at runtime. This is the
+// data-driven equivalent of the per-backend tests above.
+func TestBackendRegistry(t *testing.T) {
+	if len(backends) == 0 {
+		t.Fatal("backends registry is empty")
+	}
+	seen := map[string]bool{}
+	for _, b := range backends {
+		t.Run(b.tool, func(t *testing.T) {
+			if b.tool == "" || b.cliName == "" || b.binEnv == "" || b.promptFlag == "" {
+				t.Errorf("backend missing a required field: %+v", b)
+			}
+			if seen[b.tool] {
+				t.Errorf("duplicate tool name %q in registry", b.tool)
+			}
+			seen[b.tool] = true
+
+			// buildArgs must always start with the prompt flag carrying the task.
+			got := b.buildArgs(runOpts{task: "T", timeoutSeconds: 1})
+			if len(got) < 2 || got[0] != b.promptFlag || got[1] != "T" {
+				t.Errorf("buildArgs must start with %q <task>; got %#v", b.promptFlag, got)
+			}
+
+			// The tool must expose the shared params, and the sandbox param iff supported.
+			tool := newTool(b)
+			for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
+				if _, ok := tool.InputSchema.Properties[p]; !ok {
+					t.Errorf("tool %q missing shared param %q", b.tool, p)
+				}
+			}
+			if _, ok := tool.InputSchema.Properties["sandbox"]; ok != b.supportsSandbox() {
+				t.Errorf("tool %q sandbox-param=%v; supportsSandbox()=%v", b.tool, ok, b.supportsSandbox())
+			}
+		})
 	}
 }
