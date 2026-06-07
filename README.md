@@ -152,7 +152,7 @@ Or project scope via `.mcp.json` in a repo root:
 ### B) As a plugin — `make plugin-install` (tool + skill)
 
 This repo is also a Claude Code **plugin** (`agent-bridge`): installing it wires the
-MCP server *and* ships a skill (`skills/gemini-agent/SKILL.md`) that teaches Claude
+MCP server *and* ships a skill (`skills/agent-bridge/SKILL.md`) that teaches Claude
 when and how to delegate to `gemini_agent` (and to verify its output).
 
 Claude Code discovers plugins through **marketplaces**, not by scanning a
@@ -227,7 +227,7 @@ The plugin bundles:
 - `.claude-plugin/marketplace.json` — single-plugin local marketplace
   (`agent-bridge-local`) so `claude plugin marketplace add` can find it.
 - `.mcp.json` — registers the `agent-bridge` MCP server (`${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp`).
-- `skills/gemini-agent/SKILL.md` — guidance for Claude on delegating tasks
+- `skills/agent-bridge/SKILL.md` — guidance for Claude on delegating tasks
   (when to use it, the two modes, how to write a good `task`, and "always verify
   the output").
 
