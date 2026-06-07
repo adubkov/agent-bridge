@@ -1,5 +1,6 @@
 BINARY := agent-bridge-mcp
-PKG    := github.com/adubkov/agent-bridge-mcp
+# CMD is the MCP server's main package (module: github.com/adubkov/agent-bridge).
+CMD    := ./cmd/$(BINARY)
 
 MARKETPLACE := agent-bridge-local
 PLUGIN      := agent-bridge
@@ -12,17 +13,18 @@ AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
 .PHONY: build install vet test clean smoke smoke-gemini smoke-claude install-claude uninstall-claude install-agy uninstall-agy plugin-install plugin-uninstall help
 
-## build: compile the binary into the REPO ROOT (./agent-bridge-mcp). This is the canonical
-##        artifact: the plugin's .mcp.json (${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp) and
-##        `make install-claude` ($(CURDIR)/agent-bridge-mcp) both reference it.
+## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
+##        (./agent-bridge-mcp). This is the canonical artifact: the plugin's
+##        .mcp.json (${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp) and `make install-claude`
+##        ($(CURDIR)/agent-bridge-mcp) both reference it.
 build:
-	go build -o $(BINARY) .
+	go build -o $(BINARY) $(CMD)
 
-## install: OPTIONAL — `go install` to $GOBIN/$GOPATH/bin for standalone PATH use.
-##          NOT used by the plugin or install-claude (those use the repo-dir binary
-##          from `make build`). Only needed if you want `agent-bridge-mcp` on your PATH.
+## install: OPTIONAL — `go install` the MCP server to $GOBIN/$GOPATH/bin for standalone
+##          PATH use. NOT used by the plugin or install-claude (those use the repo-dir
+##          binary from `make build`). Only needed if you want `agent-bridge-mcp` on PATH.
 install:
-	go install .
+	go install $(CMD)
 
 ## vet: static checks
 vet:
