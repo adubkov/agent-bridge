@@ -1,7 +1,7 @@
-# agy-mcp
+# agent-bridge-mcp
 
-> A bidirectional **Claude ↔ Gemini** agent bridge over MCP. (The `agy-mcp` /
-> `agy-gemini` names are historical — the server now drives both CLIs.)
+> A bidirectional **Claude ↔ Gemini** agent bridge over MCP — exposes each coding-agent
+> CLI as a spawnable sub-agent tool. _(Formerly `agy-mcp` / `agy-gemini`.)_
 
 A tiny [MCP](https://modelcontextprotocol.io) server that bridges two coding
 agents in **both directions**, exposing each as a spawnable sub-agent tool. One
@@ -97,9 +97,9 @@ delegation chains. Invalid/missing values fall back to the defaults above.
 ## Build
 
 ```sh
-go build -o agy-mcp .          # local binary
+go build -o agent-bridge-mcp .          # local binary
 # or
-go install github.com/adubkov/agy-mcp@latest
+go install github.com/adubkov/agent-bridge-mcp@latest
 ```
 
 Each tool requires its CLI:
@@ -117,7 +117,7 @@ Use this when the **parent** is Claude Code (so Claude can delegate to Gemini vi
 `gemini_agent`). Two ways — pick one. **Either way, requires `agy` authenticated**
 (`agy` login once) and on `PATH` (or set `AGY_BIN`; the server also falls back to
 `~/.local/bin/agy`). Restart Claude Code afterward (MCP loads at session start);
-run `/mcp` to confirm the `agy` server is connected. The tools appear as
+run `/mcp` to confirm the `agent-bridge` server is connected. The tools appear as
 `gemini_agent` and `claude_agent`.
 
 ### A) MCP server only — `make install-claude` (simplest)
@@ -125,7 +125,7 @@ run `/mcp` to confirm the `agy` server is connected. The tools appear as
 Registers just the tools (user scope, available in every project):
 
 ```sh
-make install-claude     # build + `claude mcp add agy --scope user -- <binary>`
+make install-claude     # build + `claude mcp add agent-bridge --scope user -- <binary>`
 # remove later with:
 make uninstall-claude
 ```
@@ -133,7 +133,7 @@ make uninstall-claude
 Equivalent manual command:
 
 ```sh
-claude mcp add agy --scope user -- "$(pwd)/agy-mcp"
+claude mcp add agent-bridge --scope user -- "$(pwd)/agent-bridge-mcp"
 ```
 
 Or project scope via `.mcp.json` in a repo root:
@@ -141,8 +141,8 @@ Or project scope via `.mcp.json` in a repo root:
 ```json
 {
   "mcpServers": {
-    "agy": {
-      "command": "/absolute/path/to/agy-mcp/agy-mcp",
+    "agent-bridge": {
+      "command": "/absolute/path/to/agent-bridge-mcp/agent-bridge-mcp",
       "env": { "AGY_BIN": "/Users/you/.local/bin/agy" }
     }
   }
@@ -151,7 +151,7 @@ Or project scope via `.mcp.json` in a repo root:
 
 ### B) As a plugin — `make plugin-install` (tool + skill)
 
-This repo is also a Claude Code **plugin** (`agy-gemini`): installing it wires the
+This repo is also a Claude Code **plugin** (`agent-bridge`): installing it wires the
 MCP server *and* ships a skill (`skills/gemini-agent/SKILL.md`) that teaches Claude
 when and how to delegate to `gemini_agent` (and to verify its output).
 
@@ -171,7 +171,7 @@ Equivalent manual commands:
 
 ```sh
 claude plugin marketplace add "$(pwd)"
-claude plugin install agy-gemini@agy-gemini-local
+claude plugin install agent-bridge@agent-bridge-local
 ```
 
 > The marketplace records this repo's **absolute path** in your user settings, so
@@ -189,22 +189,22 @@ imports its skill + MCP server. **Requires `claude` authenticated** and on `PATH
 (or set `CLAUDE_BIN`; the server also falls back to `~/.local/bin/claude`).
 
 ```sh
-make build                              # build the ./agy-mcp binary first
+make build                              # build the ./agent-bridge-mcp binary first
 agy plugin install "$(pwd)"             # install this plugin dir into agy
 agy plugin list                         # confirm it's imported (source: claude-code)
 # remove later with:
-agy plugin uninstall agy-gemini
+agy plugin uninstall agent-bridge
 ```
 
 Installing reports the components it picked up, e.g.:
 
 ```
-[ok]  agy-gemini
+[ok]  agent-bridge
       ✔ skills      : 1 processed
       ✔ mcpServers  : 1 processed
 ```
 
-The MCP server it registers is the same `agy-mcp` binary, so **both**
+The MCP server it registers is the same `agent-bridge-mcp` binary, so **both**
 `gemini_agent` and `claude_agent` become available inside agy; from a Gemini
 session you'll typically call `claude_agent`.
 
@@ -215,8 +215,8 @@ session you'll typically call `claude_agent`.
 >   will pull it in. With nothing installed it prints `No claude extensions found.`
 > - `agy plugin install <plugin@marketplace>` is supported too, but it resolves the
 >   marketplace from **agy's** registered marketplaces — the Claude Code local
->   marketplace (`agy-gemini-local`) is not one of those, so use the **plugin-dir
->   path** form shown above rather than `agy-gemini@agy-gemini-local`.
+>   marketplace (`agent-bridge-local`) is not one of those, so use the **plugin-dir
+>   path** form shown above rather than `agent-bridge@agent-bridge-local`.
 >
 > If your `agy` version behaves differently, run `agy plugin help` and
 > `agy plugin <command>` (with no args) to see the exact usage for your build.
@@ -225,8 +225,8 @@ The plugin bundles:
 
 - `.claude-plugin/plugin.json` — plugin manifest.
 - `.claude-plugin/marketplace.json` — single-plugin local marketplace
-  (`agy-gemini-local`) so `claude plugin marketplace add` can find it.
-- `.mcp.json` — registers the `agy` MCP server (`${CLAUDE_PLUGIN_ROOT}/agy-mcp`).
+  (`agent-bridge-local`) so `claude plugin marketplace add` can find it.
+- `.mcp.json` — registers the `agent-bridge` MCP server (`${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp`).
 - `skills/gemini-agent/SKILL.md` — guidance for Claude on delegating tasks
   (when to use it, the two modes, how to write a good `task`, and "always verify
   the output").
@@ -234,7 +234,7 @@ The plugin bundles:
 ## Build (Makefile)
 
 ```sh
-make build         # compile ./agy-mcp (referenced by .mcp.json)
+make build         # compile ./agent-bridge-mcp (referenced by .mcp.json)
 make install       # go install into $GOBIN
 make vet           # static checks
 make smoke         # reason-only round-trip against BOTH tools (needs agy + claude authed)

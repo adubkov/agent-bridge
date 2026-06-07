@@ -1,4 +1,4 @@
-module github.com/adubkov/agy-mcp
+module github.com/adubkov/agent-bridge-mcp
 
 go 1.25.5
 

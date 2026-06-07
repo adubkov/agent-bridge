@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "agy-gemini-local",
-  "description": "Local marketplace for the agy-gemini plugin — a bidirectional agent bridge exposing gemini_agent and claude_agent as MCP tools, plus a delegation skill.",
+  "name": "agent-bridge-local",
+  "description": "Local marketplace for the agent-bridge plugin — a bidirectional agent bridge exposing gemini_agent and claude_agent as MCP tools, plus a delegation skill.",
   "owner": {
     "name": "Alexey Dubkov",
     "email": "alexey@dubkov.com"
   },
   "plugins": [
     {
-      "name": "agy-gemini",
+      "name": "agent-bridge",
       "description": "Bidirectional agent bridge as an MCP server: exposes `gemini_agent` (spawn a Gemini agent via the Antigravity `agy` CLI) and `claude_agent` (spawn a Claude agent via the `claude` CLI), plus a skill for delegating to Gemini.",
       "author": { "name": "Alexey Dubkov" },
       "category": "mcp",

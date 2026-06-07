@@ -1,4 +1,4 @@
-// Command agy-mcp is a tiny MCP (Model Context Protocol) server that bridges two
+// Command agent-bridge-mcp is a tiny MCP (Model Context Protocol) server that bridges two
 // coding agents in BOTH directions, exposing each as a spawnable sub-agent tool.
 //
 // Two tools are registered:
@@ -288,7 +288,7 @@ func childHopEnv(env []string, depth int) []string {
 
 func main() {
 	s := server.NewMCPServer(
-		"agy-mcp",
+		"agent-bridge-mcp",
 		"0.1.0",
 		server.WithToolCapabilities(false),
 	)
@@ -298,7 +298,7 @@ func main() {
 	}
 
 	if err := server.ServeStdio(s); err != nil {
-		fmt.Fprintf(os.Stderr, "agy-mcp: server error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agent-bridge-mcp: server error: %v\n", err)
 		os.Exit(1)
 	}
 }

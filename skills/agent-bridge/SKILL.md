@@ -1,14 +1,17 @@
 ---
-name: gemini-agent
-description: Use when you want to delegate a self-contained task to a fast Gemini agent (via the `gemini_agent` MCP tool from the agy-gemini plugin) — e.g. mechanical bulk edits, broad parallel exploration, a fast first-pass draft, or an independent second opinion — while you keep orchestrating. Requires the agy-gemini MCP server (tool name `gemini_agent`).
+name: agent-bridge
+description: Use when you want to delegate a self-contained task to a fast Gemini agent (via the `gemini_agent` MCP tool from the agent-bridge plugin) — e.g. mechanical bulk edits, broad parallel exploration, a fast first-pass draft, or an independent second opinion — while you keep orchestrating. Requires the agent-bridge MCP server (tool name `gemini_agent`).
 ---
 
 # Delegating to a Gemini agent (`gemini_agent`)
 
-The `agy-gemini` plugin exposes one MCP tool, **`gemini_agent`**, which spawns a
-Gemini agent (Antigravity `agy` CLI) to perform a task and returns its output.
-It is a real sub-agent: it runs non-interactively and can — when allowed — edit
-files and run commands in a working directory you give it.
+The `agent-bridge` plugin exposes two MCP tools: **`gemini_agent`** (Claude →
+Gemini, via the Antigravity `agy` CLI) and `claude_agent` (the reverse, Gemini →
+Claude — for use from a Gemini session, not relevant here). From a Claude session
+you delegate with **`gemini_agent`**, which spawns a Gemini agent to perform a
+task and returns its output. It is a real sub-agent: it runs non-interactively
+and can — when allowed — edit files and run commands in a working directory you
+give it.
 
 ## When to use it
 

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "agy": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/agy-mcp",
+    "agent-bridge": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp",
       "args": [],
       "env": {}
     }

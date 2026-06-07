@@ -1,5 +1,5 @@
 {
-  "name": "agy-gemini",
+  "name": "agent-bridge",
   "version": "0.1.0",
   "description": "Bidirectional agent bridge as an MCP server: exposes `gemini_agent` (spawn a Gemini agent via the Antigravity `agy` CLI) and `claude_agent` (spawn a Claude agent via the `claude` CLI), plus a skill for delegating to Gemini.",
   "author": { "name": "Alexey Dubkov" },
