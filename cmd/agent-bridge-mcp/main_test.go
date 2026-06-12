@@ -259,6 +259,66 @@ func TestBuildGeminiArgs(t *testing.T) {
 	}
 }
 
+func TestBuildCodexArgs(t *testing.T) {
+	const task = "do the thing"
+	tests := []struct {
+		name string
+		in   runOpts
+		want []string
+	}{
+		{
+			name: "reason-only: exec first, read-only sandbox, prompt LAST after --",
+			in:   runOpts{task: task, timeoutSeconds: 300},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "allow_tools: bypass flag present, no read-only sandbox, prompt LAST after --",
+			in:   runOpts{task: task, timeoutSeconds: 300, allowTools: true},
+			want: []string{"exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--color", "never", "--", task},
+		},
+		{
+			name: "model and add_dirs land between exec and the trailing prompt",
+			in:   runOpts{task: task, timeoutSeconds: 300, model: "gpt-5", addDirs: []string{"/a", "/b"}},
+			want: []string{"exec", "--model", "gpt-5", "--add-dir", "/a", "--add-dir", "/b", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "blank model dropped; sandbox bool ignored (codex has no boolean --sandbox)",
+			in:   runOpts{task: task, timeoutSeconds: 300, model: "  ", sandbox: true},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "no --print-timeout even with a custom timeout",
+			in:   runOpts{task: task, timeoutSeconds: 900},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "dash-leading task is shielded by -- (parsed as prompt, not a flag)",
+			in:   runOpts{task: "--fix the bug", timeoutSeconds: 300},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", "--fix the bug"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexBackend.buildArgs(tt.in)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("codexBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
+			}
+			// exec subcommand must lead, and the prompt must be the trailing positional
+			// arg — never a --print value (codex has no --print).
+			if len(got) == 0 || got[0] != "exec" {
+				t.Errorf("codex must start with the exec subcommand; got %#v", got)
+			}
+			if len(got) == 0 || got[len(got)-1] != tt.in.task {
+				t.Errorf("codex prompt must be the trailing positional arg; got %#v", got)
+			}
+			if argsContain(got, "--print") || argsContain(got, "--print-timeout") {
+				t.Errorf("codex must never emit --print/--print-timeout; got %#v", got)
+			}
+		})
+	}
+}
+
 func TestParseHopEnv(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -428,6 +488,21 @@ func TestResolveBinClaudeEnvOverride(t *testing.T) {
 	}
 }
 
+func TestResolveBinCodexEnvOverride(t *testing.T) {
+	// CODEX_BIN override takes top priority and is reachable without network.
+	t.Setenv("CODEX_BIN", "/custom/path/to/codex")
+	if got := codexBackend.resolveBin(); got != "/custom/path/to/codex" {
+		t.Errorf("codexBackend.resolveBin() with CODEX_BIN set = %q; want %q", got, "/custom/path/to/codex")
+	}
+
+	// Whitespace-only override is treated as unset (falls through to lookup/fallback,
+	// which must never be the override value).
+	t.Setenv("CODEX_BIN", "   ")
+	if got := codexBackend.resolveBin(); got == "   " {
+		t.Errorf("codexBackend.resolveBin() treated whitespace CODEX_BIN as a path: %q", got)
+	}
+}
+
 func TestModeNotes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -464,6 +539,18 @@ func TestModeNotes(t *testing.T) {
 			b:    claudeBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions)",
+		},
+		{
+			name: "codex reason-only is a read-only sandbox, not disabled",
+			b:    codexBackend,
+			in:   runOpts{},
+			want: "tool-use: read-only (--sandbox read-only)",
+		},
+		{
+			name: "codex allow_tools names the bypass flag, no --sandbox suffix",
+			b:    codexBackend,
+			in:   runOpts{allowTools: true, sandbox: true},
+			want: "tool-use: ENABLED (--dangerously-bypass-approvals-and-sandbox)",
 		},
 	}
 
@@ -518,7 +605,7 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 func TestRunAgentHopLimit(t *testing.T) {
-	for _, base := range []backend{geminiBackend, claudeBackend} {
+	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// depth == max => the guard must refuse before any spawn.
 			t.Setenv(hopDepthEnv, "2")
@@ -562,7 +649,9 @@ func TestRunAgentOutcomes(t *testing.T) {
 					t.Fatalf("unexpected error result: %q", resultText(t, res))
 				}
 				txt := resultText(t, res)
-				wantPrefix := "[" + b.tool + " | tool-use: disabled (reason/answer only) | "
+				// Derive the expected mode note from the backend so this holds for
+				// every CLI (codex's reason-only header is read-only, not "disabled").
+				wantPrefix := "[" + b.tool + " | " + b.modeNote(runOpts{}) + " | "
 				if !strings.HasPrefix(txt, wantPrefix) {
 					t.Errorf("header wrong; got %q want prefix %q", txt, wantPrefix)
 				}
@@ -606,7 +695,7 @@ func TestRunAgentOutcomes(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		for _, base := range []backend{geminiBackend, claudeBackend} {
+		for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
 			t.Run(tt.name+"/"+base.tool, func(t *testing.T) {
 				tb := withBin(t, base, writeFakeBin(t, tt.script))
 				res, err := runAgent(context.Background(), tb, runOpts{task: "do it", timeoutSeconds: 300})
@@ -622,7 +711,7 @@ func TestRunAgentParentCancel(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend} {
+	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// `exec` so the killed process IS the sleep (no orphaned grandchild
 			// holding the stdout pipe open past the cancellation).
@@ -648,7 +737,7 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend} {
+	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
 			// Shrink the per-backend headroom (no global mutation) so the hard
@@ -766,7 +855,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	}
 
 	t.Run("empty/whitespace task is rejected before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend} {
+		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
 			res, err := call(t, b, map[string]any{"task": "   "})
 			if err != nil {
 				t.Fatalf("[%s] unexpected Go error: %v", b.tool, err)
@@ -862,7 +951,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("cancelled context returns a Go error before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend} {
+		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			h := makeHandler(withBin(t, b, echo))
@@ -894,7 +983,7 @@ func writeExec(t *testing.T, dir, name string) string {
 }
 
 func TestResolveBinaryFallbacks(t *testing.T) {
-	for _, b := range []backend{geminiBackend, claudeBackend} {
+	for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
 		t.Run(b.cliName, func(t *testing.T) {
 			t.Run("found on PATH via LookPath", func(t *testing.T) {
 				t.Setenv(b.binEnv, "")
@@ -939,6 +1028,9 @@ func TestBackendTimeoutHeadroom(t *testing.T) {
 	if claudeBackend.timeoutHeadroom != 0 {
 		t.Errorf("claudeBackend.timeoutHeadroom = %v; want 0 (no --print-timeout)", claudeBackend.timeoutHeadroom)
 	}
+	if codexBackend.timeoutHeadroom != 0 {
+		t.Errorf("codexBackend.timeoutHeadroom = %v; want 0 (no internal timeout)", codexBackend.timeoutHeadroom)
+	}
 }
 
 // TestToolSchemas verifies the deduped tool builders produce correct, accurate
@@ -947,6 +1039,7 @@ func TestBackendTimeoutHeadroom(t *testing.T) {
 func TestToolSchemas(t *testing.T) {
 	gemini := newTool(geminiBackend)
 	claude := newTool(claudeBackend)
+	codex := newTool(codexBackend)
 
 	if gemini.Name != "gemini_agent" {
 		t.Errorf("gemini tool name = %q; want gemini_agent", gemini.Name)
@@ -954,8 +1047,11 @@ func TestToolSchemas(t *testing.T) {
 	if claude.Name != "claude_agent" {
 		t.Errorf("claude tool name = %q; want claude_agent", claude.Name)
 	}
+	if codex.Name != "codex_agent" {
+		t.Errorf("codex tool name = %q; want codex_agent", codex.Name)
+	}
 
-	// Shared params present on both.
+	// Shared params present on all three.
 	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
 		if _, ok := gemini.InputSchema.Properties[p]; !ok {
 			t.Errorf("gemini tool missing shared param %q", p)
@@ -963,14 +1059,20 @@ func TestToolSchemas(t *testing.T) {
 		if _, ok := claude.InputSchema.Properties[p]; !ok {
 			t.Errorf("claude tool missing shared param %q", p)
 		}
+		if _, ok := codex.InputSchema.Properties[p]; !ok {
+			t.Errorf("codex tool missing shared param %q", p)
+		}
 	}
 
-	// sandbox is gemini-only.
+	// sandbox is gemini-only; claude and codex must NOT expose it.
 	if _, ok := gemini.InputSchema.Properties["sandbox"]; !ok {
 		t.Error("gemini tool should expose the sandbox param")
 	}
 	if _, ok := claude.InputSchema.Properties["sandbox"]; ok {
 		t.Error("claude tool must NOT expose a sandbox param")
+	}
+	if _, ok := codex.InputSchema.Properties["sandbox"]; ok {
+		t.Error("codex tool must NOT expose a sandbox param")
 	}
 
 	// The gemini description must not claim sandbox-by-default (the bug this fixes),
@@ -980,6 +1082,12 @@ func TestToolSchemas(t *testing.T) {
 	}
 	if !strings.Contains(gemini.Description, "OFF by default") {
 		t.Errorf("gemini description should state sandboxing is OFF by default: %q", gemini.Description)
+	}
+
+	// The codex description must convey that its default (allow_tools:false) is a
+	// read-only sandbox, not a pure no-tools mode — the key semantic difference.
+	if !strings.Contains(codex.Description, "read-only") {
+		t.Errorf("codex description should state its default is read-only: %q", codex.Description)
 	}
 }
 
@@ -993,17 +1101,36 @@ func TestBackendRegistry(t *testing.T) {
 	seen := map[string]bool{}
 	for _, b := range backends {
 		t.Run(b.tool, func(t *testing.T) {
-			if b.tool == "" || b.cliName == "" || b.binEnv == "" || b.promptFlag == "" {
+			if b.tool == "" || b.cliName == "" || b.binEnv == "" {
 				t.Errorf("backend missing a required field: %+v", b)
+			}
+			// Every backend must carry the prompt exactly one way: a flag value
+			// (flag-style) or a trailing positional argument (promptPositional).
+			if b.promptFlag == "" && !b.promptPositional {
+				t.Errorf("backend %q has neither promptFlag nor promptPositional: %+v", b.tool, b)
+			}
+			if b.promptFlag != "" && b.promptPositional {
+				t.Errorf("backend %q sets both promptFlag and promptPositional (ambiguous)", b.tool)
+			}
+			// Every backend exposes allow_tools, and modeNote/buildArgs derive the
+			// enabled mode from skipPermsFlag. An empty one would render the header
+			// "tool-use: ENABLED ()" while buildArgs silently passes no skip flag.
+			if b.skipPermsFlag == "" {
+				t.Errorf("backend %q has empty skipPermsFlag; an allow_tools run would claim ENABLED with no flag", b.tool)
 			}
 			if seen[b.tool] {
 				t.Errorf("duplicate tool name %q in registry", b.tool)
 			}
 			seen[b.tool] = true
 
-			// buildArgs must always start with the prompt flag carrying the task.
+			// buildArgs must carry the task: flag-style starts with promptFlag <task>;
+			// positional ends with <task> (after subcmd and every flag).
 			got := b.buildArgs(runOpts{task: "T", timeoutSeconds: 1})
-			if len(got) < 2 || got[0] != b.promptFlag || got[1] != "T" {
+			if b.promptPositional {
+				if len(got) == 0 || got[len(got)-1] != "T" {
+					t.Errorf("positional-prompt buildArgs must end with <task>; got %#v", got)
+				}
+			} else if len(got) < 2 || got[0] != b.promptFlag || got[1] != "T" {
 				t.Errorf("buildArgs must start with %q <task>; got %#v", b.promptFlag, got)
 			}
 

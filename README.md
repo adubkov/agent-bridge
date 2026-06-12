@@ -3,25 +3,28 @@
 > A bridge between coding agents — expose each agent's CLI as a spawnable
 > sub-agent tool. Today it ships an MCP server (the `agent-bridge-mcp` binary,
 > under [`cmd/agent-bridge-mcp`](cmd/agent-bridge-mcp)) with bidirectional
-> **Claude ↔ Gemini** delegation. _(Formerly `agy-mcp` / `agy-gemini`.)_
+> **Claude ↔ Gemini** delegation plus an OpenAI **Codex** sub-agent.
+> _(Formerly `agy-mcp` / `agy-gemini`.)_
 
-A tiny [MCP](https://modelcontextprotocol.io) server that bridges two coding
-agents in **both directions**, exposing each as a spawnable sub-agent tool. One
-binary registers two tools:
+A tiny [MCP](https://modelcontextprotocol.io) server that bridges coding agents,
+exposing each as a spawnable sub-agent tool. One binary registers three tools:
 
 - **`gemini_agent`** — shells out to the Antigravity CLI (`agy --print <task>`),
   i.e. spawns a **Gemini** sub-agent. Intended to be called from a Claude session.
 - **`claude_agent`** — shells out to the Claude CLI (`claude --print <task>`),
   i.e. spawns a **Claude** sub-agent. Intended to be called from a Gemini session.
+- **`codex_agent`** — shells out to the OpenAI Codex CLI (`codex exec <task>`),
+  i.e. spawns a **Codex** sub-agent. Callable from any parent session.
 
 A parent agent calls a tool with a self-contained task; this server shells out to
 the corresponding CLI, lets the child agent perform it, and returns the child's
 full output. In effect each tool is a **spawned sub-agent callable from inside
 another agent's session**.
 
-Both tools share one backend adapter, so the run / timeout / truncation / result
-header / context-cancel / loop-guard behavior is identical; they differ only in
-which CLI they invoke and which CLI-specific flags they support.
+All three tools share one backend adapter, so the run / timeout / truncation /
+result header / context-cancel / loop-guard behavior is identical; they differ
+only in which CLI they invoke and which CLI-specific flags they support. Adding a
+CLI agent is a single entry in the in-code backend registry, not new code.
 
 ## Tool: `gemini_agent`
 
@@ -56,7 +59,30 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
 `--sandbox` is never passed to `claude`.
 
-### Safety model (both tools)
+## Tool: `codex_agent`
+
+Spawns an **OpenAI Codex** agent via the `codex` CLI (`codex exec`). Codex's
+permission model differs from the others: it has **no pure "no tools" mode** — it
+always runs as an autonomous agent — so `allow_tools` toggles between a *read-only
+sandbox* and *full, unsandboxed access* rather than off/on.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `task` | string (required) | — | The complete, self-contained task/prompt for Codex. Passed as the trailing positional argument to `codex exec`. |
+| `add_dirs` | string[] | — | Additional writable directories (absolute paths). Repeated as `--add-dir`. |
+| `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
+| `timeout_seconds` | number | 300 (max 1800) | Codex `exec` has **no** internal timeout flag; the timeout is enforced purely by the process context deadline. |
+| `model` | string | CLI default | Optional model; passed as `--model <model>` only when non-empty. |
+| `allow_tools` | bool | **false** | **false** → read-only sandbox (`--sandbox read-only`): Codex reads and reasons but cannot edit files or run effectful commands. **true** → passes `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access, edits landing in `working_dir`. |
+
+There is **no `sandbox` param** on `codex_agent` — `allow_tools` already selects
+read-only vs. full access. Codex always runs with `--skip-git-repo-check` (so it
+works outside a Git repo). On success the tool returns Codex's final message;
+Codex's session banner and step-by-step transcript go to **stderr** and are
+surfaced only if the run fails or times out (so a successful result is as clean as
+the other backends, not noisier).
+
+### Safety model (all tools)
 
 By default the spawned agent is **reason/answer only** — it runs `--print` with no
 permission bypass, so it can analyze, draft, and answer but cannot take unattended
@@ -69,6 +95,12 @@ For `gemini_agent`, `--sandbox` is **off by default**: with it on, `agy` confine
 the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.
 Set `sandbox: true` only for a confined "compute but don't touch my files" run.
 `claude_agent` has no sandbox concept.
+
+**`codex_agent` differs:** Codex has no pure no-tools mode, so `allow_tools: false`
+runs it in a **read-only sandbox** (`--sandbox read-only`) — it can read and reason
+but not write — and `allow_tools: true` passes
+`--dangerously-bypass-approvals-and-sandbox` (full access, no sandbox). Its
+result-header mode note reflects this (`tool-use: read-only (--sandbox read-only)`).
 
 The tool result header always reports which tool ran, the mode, and the elapsed
 time: `[<tool> | <modeNote> | <elapsed>]`.
@@ -110,6 +142,8 @@ Each tool requires its CLI:
   falls back to `~/.local/bin/agy`, then `agy`.
 - `claude_agent` needs `claude` on `PATH` (or set `CLAUDE_BIN=/path/to/claude`);
   the server falls back to `~/.local/bin/claude`, then `claude`.
+- `codex_agent` needs `codex` on `PATH` (or set `CODEX_BIN=/path/to/codex`); the
+  server falls back to `~/.local/bin/codex`, then `codex`.
 
 You only need the CLI for the tool you actually call.
 
@@ -120,7 +154,7 @@ Use this when the **parent** is Claude Code (so Claude can delegate to Gemini vi
 (`agy` login once) and on `PATH` (or set `AGY_BIN`; the server also falls back to
 `~/.local/bin/agy`). Restart Claude Code afterward (MCP loads at session start);
 run `/mcp` to confirm the `agent-bridge` server is connected. The tools appear as
-`gemini_agent` and `claude_agent`.
+`gemini_agent`, `claude_agent`, and `codex_agent`.
 
 ### A) MCP server only — `make install-claude` (simplest)
 
@@ -239,9 +273,10 @@ The plugin bundles:
 make build         # compile ./agent-bridge-mcp (referenced by .mcp.json)
 make install       # go install into $GOBIN
 make vet           # static checks
-make smoke         # reason-only round-trip against BOTH tools (needs agy + claude authed)
+make smoke         # reason-only round-trip against ALL tools (needs agy + claude + codex authed)
 make smoke-gemini  # round-trip against gemini_agent only (needs agy authed)
 make smoke-claude  # round-trip against claude_agent only (needs claude authed)
+make smoke-codex   # round-trip against codex_agent only (needs codex authed)
 make help          # list targets
 ```
 
@@ -283,6 +318,26 @@ Acting mode — let Claude edit files (unattended; scope it with `working_dir`):
   "working_dir": "/path/to/project",
   "add_dirs": ["/path/to/project"],
   "model": "sonnet",
+  "allow_tools": true
+}
+```
+
+### `codex_agent`
+
+Read-only (safe default — `--sandbox read-only`, no writes):
+
+```json
+{ "task": "Review this Go error-handling pattern and suggest improvements: ..." }
+```
+
+Acting mode — full, unsandboxed access (`--dangerously-bypass-approvals-and-sandbox`;
+scope it with `working_dir` and verify the diff afterward):
+
+```json
+{
+  "task": "Rename the symbol Foo to Bar across this package and update callers. Make the edits and list the files you changed.",
+  "working_dir": "/path/to/project",
+  "add_dirs": ["/path/to/project"],
   "allow_tools": true
 }
 ```

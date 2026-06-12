@@ -5,13 +5,17 @@ description: Use when you want to delegate a self-contained task to a fast Gemin
 
 # Delegating to a Gemini agent (`gemini_agent`)
 
-The `agent-bridge` plugin exposes two MCP tools: **`gemini_agent`** (Claude →
-Gemini, via the Antigravity `agy` CLI) and `claude_agent` (the reverse, Gemini →
-Claude — for use from a Gemini session, not relevant here). From a Claude session
-you delegate with **`gemini_agent`**, which spawns a Gemini agent to perform a
-task and returns its output. It is a real sub-agent: it runs non-interactively
-and can — when allowed — edit files and run commands in a working directory you
-give it.
+The `agent-bridge` plugin exposes three MCP tools: **`gemini_agent`** (Claude →
+Gemini, via the Antigravity `agy` CLI), `claude_agent` (the reverse, Gemini →
+Claude — for use from a Gemini session, not relevant here), and `codex_agent`
+(spawns an OpenAI Codex agent via `codex exec`). From a Claude session you usually
+delegate with **`gemini_agent`**, which spawns a Gemini agent to perform a task
+and returns its output. It is a real sub-agent: it runs non-interactively and
+can — when allowed — edit files and run commands in a working directory you give
+it. `codex_agent` is an alternative target with the same `task` / `working_dir` /
+`add_dirs` / `allow_tools` interface; note its `allow_tools: false` is a *read-only
+sandbox* (Codex has no pure no-tools mode), and `allow_tools: true` grants full
+unsandboxed access — otherwise call it the same way.
 
 ## When to use it
 

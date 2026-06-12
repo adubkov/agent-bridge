@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # the absolute repo binary. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-gemini smoke-claude install-claude uninstall-claude install-agy uninstall-agy plugin-install plugin-uninstall help
+.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy plugin-install plugin-uninstall help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). This is the canonical artifact: the plugin's
@@ -34,19 +34,21 @@ vet:
 test:
 	go test ./...
 
-## smoke: build + smoke-test BOTH tools (gemini_agent + claude_agent). Needs agy AND
-##        claude authed; runs each in a clean temp dir. For one tool, use the
-##        smoke-gemini / smoke-claude targets.
-smoke: smoke-gemini smoke-claude
-	@echo "smoke OK (gemini + claude)"
+## smoke: build + smoke-test ALL tools (gemini_agent + claude_agent + codex_agent).
+##        Needs agy, claude AND codex authed; runs each in a clean temp dir. For one
+##        tool, use the smoke-gemini / smoke-claude / smoke-codex targets.
+smoke: smoke-gemini smoke-claude smoke-codex
+	@echo "smoke OK (gemini + claude + codex)"
 
 # Map each smoke-<label> target to the MCP tool it exercises.
 TOOL_gemini := gemini_agent
 TOOL_claude := claude_agent
+TOOL_codex  := codex_agent
 
 ## smoke-gemini: smoke-test just gemini_agent (clean temp dir; needs agy authed)
 ## smoke-claude: smoke-test just claude_agent (clean temp dir; needs claude authed)
-smoke-gemini smoke-claude: smoke-%: build
+## smoke-codex: smoke-test just codex_agent (clean temp dir; needs codex authed)
+smoke-gemini smoke-claude smoke-codex: smoke-%: build
 	@mkdir -p /tmp/agent-bridge-mcp-smoke-$*
 	@printf '%s\n' \
 	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
@@ -57,7 +59,7 @@ smoke-gemini smoke-claude: smoke-%: build
 ## install-claude: register the MCP server with Claude Code (user scope) via `claude mcp add`
 install-claude: build
 	claude mcp add agent-bridge --scope user -- $(CURDIR)/$(BINARY)
-	@echo "registered 'agent-bridge' MCP server (tools: gemini_agent + claude_agent — from Claude use gemini_agent). Restart Claude Code, then /mcp to confirm."
+	@echo "registered 'agent-bridge' MCP server (tools: gemini_agent + claude_agent + codex_agent — from Claude use gemini_agent or codex_agent). Restart Claude Code, then /mcp to confirm."
 
 ## uninstall-claude: remove the MCP server registration from Claude Code
 uninstall-claude:
@@ -100,7 +102,7 @@ install-agy: build
 	else \
 	  echo "WARNING: $$cfg not found; agy plugin layout may differ. Set the MCP command to $(CURDIR)/$(BINARY) manually (or pass AGY_PLUGIN_DIR=...)."; \
 	fi
-	@echo "installed $(PLUGIN) into agy (MCP: agent-bridge; tools: gemini_agent + claude_agent — from agy use claude_agent). Restart Antigravity; 'agy plugin list' to confirm."
+	@echo "installed $(PLUGIN) into agy (MCP: agent-bridge; tools: gemini_agent + claude_agent + codex_agent — from agy use claude_agent). Restart Antigravity; 'agy plugin list' to confirm."
 
 ## uninstall-agy: remove this plugin's registration from the Antigravity `agy` CLI
 uninstall-agy:

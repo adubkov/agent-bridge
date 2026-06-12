@@ -1,12 +1,14 @@
-// Command agent-bridge-mcp is a tiny MCP (Model Context Protocol) server that bridges two
-// coding agents in BOTH directions, exposing each as a spawnable sub-agent tool.
+// Command agent-bridge-mcp is a tiny MCP (Model Context Protocol) server that
+// bridges coding agents, exposing each as a spawnable sub-agent tool.
 //
-// Two tools are registered:
+// Three tools are registered:
 //
 //   - gemini_agent — shells out to the Antigravity CLI (`agy --print <task>`),
 //     i.e. spawns a Gemini sub-agent. Intended to be called from a Claude session.
 //   - claude_agent — shells out to the Claude CLI (`claude --print <task>`),
 //     i.e. spawns a Claude sub-agent. Intended to be called from a Gemini session.
+//   - codex_agent — shells out to the OpenAI Codex CLI (`codex exec <task>`),
+//     i.e. spawns a Codex sub-agent. Callable from any parent session.
 //
 // A parent agent calls the tool with a self-contained task; this server shells
 // out to the corresponding CLI, lets the child agent perform the task, and
@@ -22,12 +24,15 @@
 // `allow_tools: true`:
 //   - gemini_agent passes --dangerously-skip-permissions to `agy`.
 //   - claude_agent passes --dangerously-skip-permissions to `claude`.
+//   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
 //
 // Scope it with `working_dir`. For gemini_agent the `--sandbox` flag is OFF by
 // default because it confines edits to an isolated scratch dir (set
 // `sandbox: true` only for a confined "compute but don't touch my files" run);
-// claude_agent has NO sandbox option. The tool result header always reports
-// which mode ran.
+// claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so
+// its default (`allow_tools: false`) runs it in a read-only sandbox
+// (--sandbox read-only) rather than fully disabling tools. The tool result header
+// always reports which mode ran.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
@@ -80,7 +85,7 @@ type runOpts struct {
 	task           string
 	timeoutSeconds int
 	allowTools     bool
-	sandbox        bool // gemini-only; ignored by the claude backend
+	sandbox        bool // gemini-only boolean --sandbox; ignored by claude/codex
 	model          string
 	addDirs        []string
 	workingDir     string
@@ -113,6 +118,21 @@ const (
 		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
 		"only). Use with care — this is unattended execution that consumes Claude credits; scope it with working_dir."
 
+	codexToolDescription = "Spawn an OpenAI Codex agent (via the `codex` CLI, `codex exec`) to perform a task and return " +
+		"its response. Give it a self-contained task in `task`; it runs non-interactively and returns Codex's full " +
+		"output. By default (`allow_tools` false) the agent runs READ-ONLY (--sandbox read-only): it can read files " +
+		"and reason but CANNOT edit files or run effectful commands — note this is a read-only sandbox, not a pure " +
+		"no-tools mode. Set `allow_tools: true` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
+		"so it runs UNATTENDED with full file/command access and NO sandbox, with edits landing in `working_dir`. Use " +
+		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Codex runs even outside a " +
+		"Git repo (--skip-git-repo-check is always passed). The tool returns Codex's final message; its session banner " +
+		"and step-by-step transcript go to stderr and are surfaced only if the run fails or times out."
+
+	codexAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
+		"passing --dangerously-bypass-approvals-and-sandbox, which skips ALL approvals AND disables Codex's sandbox. " +
+		"Default false (read-only sandbox: reads/reasons, no writes). Use with care — this is fully unattended, " +
+		"unsandboxed execution; scope it with working_dir."
+
 	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
 		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
 		"confined 'compute but don't touch my files' run."
@@ -127,18 +147,44 @@ type backend struct {
 	cliName string // CLI binary name, e.g. "agy"; used for PATH/fallback lookup and the "(<cli> returned no stdout)" note
 	binEnv  string // env override for the CLI path, e.g. "AGY_BIN"
 
-	// Flag names. promptFlag carries the task as its VALUE and is emitted FIRST;
-	// every other flag follows. "" means the CLI does not support that flag.
-	promptFlag    string // "--print"
-	timeoutFlag   string // "--print-timeout" (gemini) | "" (claude: ctx deadline only)
+	// subcmd is emitted right after the binary, before any flags or the prompt
+	// (e.g. ["exec"] for codex). nil for CLIs invoked as `<bin> [flags] <prompt>`.
+	subcmd []string
+
+	// Flag names. For flag-style CLIs (gemini/claude) promptFlag carries the task
+	// as its VALUE and is emitted FIRST; every other flag follows. "" means the CLI
+	// does not support that flag. When promptPositional is set the task is a
+	// trailing positional argument instead and promptFlag is unused.
+	promptFlag    string // "--print" (flag-style) | "" (positional, see promptPositional)
+	timeoutFlag   string // "--print-timeout" (gemini) | "" (claude/codex: ctx deadline only)
 	modelFlag     string // "--model"
 	addDirFlag    string // "--add-dir"
-	skipPermsFlag string // "--dangerously-skip-permissions"
-	sandboxFlag   string // "--sandbox" (gemini) | "" (claude)
+	skipPermsFlag string // "--dangerously-skip-permissions" (gemini/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
+	sandboxFlag   string // "--sandbox" (gemini boolean) | "" (claude/codex)
+
+	// promptPositional makes the task a trailing positional argument (emitted LAST,
+	// after subcmd and every flag) instead of promptFlag's value — for CLIs like
+	// codex whose non-interactive form is `<bin> exec [flags] <prompt>`.
+	promptPositional bool
+
+	// extraArgs are static flags always appended to the invocation (e.g. codex's
+	// ["--skip-git-repo-check", "--color", "never"]). nil for CLIs that need none.
+	extraArgs []string
+
+	// reasonOnlyArgs are appended only when allow_tools is false — the restraint a
+	// CLI needs to stay read-only when it has no true no-tools mode (codex:
+	// ["--sandbox", "read-only"]). gemini/claude leave this nil: omitting the
+	// skip-perms flag already makes them reason-only.
+	reasonOnlyArgs []string
+
+	// reasonOnlyNote overrides the result-header mode note for reason-only runs.
+	// "" yields the default "tool-use: disabled (reason/answer only)"; codex sets it
+	// to reflect that its reason-only run is a read-only sandbox, not pure no-tools.
+	reasonOnlyNote string
 
 	// timeoutHeadroom is extra wall-clock added to the requested timeout before the
 	// child is hard-killed. Non-zero only for CLIs with their own internal timeout
-	// (gemini/agy); zero for claude (the context deadline is the timeout).
+	// (gemini/agy); zero for claude/codex (the context deadline is the timeout).
 	timeoutHeadroom time.Duration
 
 	description    string // model-facing tool description
@@ -167,13 +213,19 @@ func (b backend) resolveBin() string {
 	return b.cliName
 }
 
-// buildArgs builds the CLI invocation from the backend's flag spec. CRITICAL:
-// promptFlag takes the task as its VALUE and is emitted FIRST, with every other
-// flag AFTER it — putting another flag between promptFlag and the task makes the
-// CLI treat that flag as the prompt. An empty flag name means the CLI lacks that
-// option, so it (and its value/loop) is skipped. Pure — table-testable.
+// buildArgs builds the CLI invocation from the backend's flag spec. CRITICAL for
+// flag-style CLIs: promptFlag takes the task as its VALUE and is emitted FIRST,
+// with every other flag AFTER it — putting another flag between promptFlag and the
+// task makes the CLI treat that flag as the prompt. Positional CLIs
+// (promptPositional) instead carry the task as a TRAILING argument emitted last,
+// after subcmd and every flag (e.g. `codex exec [flags] <prompt>`). An empty flag
+// name means the CLI lacks that option, so it (and its value/loop) is skipped.
+// Pure — table-testable.
 func (b backend) buildArgs(o runOpts) []string {
-	args := []string{b.promptFlag, o.task}
+	args := append([]string{}, b.subcmd...)
+	if !b.promptPositional {
+		args = append(args, b.promptFlag, o.task)
+	}
 	if b.timeoutFlag != "" {
 		args = append(args, b.timeoutFlag, fmt.Sprintf("%ds", o.timeoutSeconds))
 	}
@@ -191,17 +243,37 @@ func (b backend) buildArgs(o runOpts) []string {
 	if o.sandbox && b.sandboxFlag != "" {
 		args = append(args, b.sandboxFlag)
 	}
+	args = append(args, b.extraArgs...)
+	// reasonOnlyArgs keep a CLI without a true no-tools mode read-only when
+	// allow_tools is false (e.g. codex's --sandbox read-only).
+	if !o.allowTools {
+		args = append(args, b.reasonOnlyArgs...)
+	}
+	// Positional prompt goes LAST, after subcmd and every flag, preceded by the "--"
+	// end-of-options marker. Without it a task that starts with a dash (e.g.
+	// "--fix the bug") or matches a subcommand name (codex exec's resume/review/help)
+	// is parsed as a flag/subcommand instead of the prompt — codex itself rejects it
+	// with "unexpected argument ... use '-- ...'".
+	if b.promptPositional {
+		args = append(args, "--", o.task)
+	}
 	return args
 }
 
-// modeNote describes the run mode for the result header.
+// modeNote describes the run mode for the result header. The strings are derived
+// from the backend's own flags so they stay accurate per CLI: reason-only uses
+// reasonOnlyNote when set (codex is read-only, not no-tools), and the enabled note
+// names the backend's actual skip-perms / sandbox flags.
 func (b backend) modeNote(o runOpts) string {
 	if !o.allowTools {
+		if b.reasonOnlyNote != "" {
+			return b.reasonOnlyNote
+		}
 		return "tool-use: disabled (reason/answer only)"
 	}
-	note := "tool-use: ENABLED (--dangerously-skip-permissions)"
+	note := fmt.Sprintf("tool-use: ENABLED (%s)", b.skipPermsFlag)
 	if o.sandbox && b.supportsSandbox() {
-		note += " in --sandbox"
+		note += " in " + b.sandboxFlag
 	}
 	return note
 }
@@ -237,6 +309,25 @@ var backends = []backend{
 		description:    claudeToolDescription,
 		allowToolsDesc: claudeAllowToolsDescription,
 	},
+	{
+		tool:             "codex_agent",
+		cliName:          "codex",
+		binEnv:           "CODEX_BIN",
+		subcmd:           []string{"exec"},
+		promptPositional: true,
+		modelFlag:        "--model",
+		addDirFlag:       "--add-dir",
+		skipPermsFlag:    "--dangerously-bypass-approvals-and-sandbox",
+		extraArgs:        []string{"--skip-git-repo-check", "--color", "never"},
+		reasonOnlyArgs:   []string{"--sandbox", "read-only"},
+		reasonOnlyNote:   "tool-use: read-only (--sandbox read-only)",
+		// promptFlag/timeoutFlag/sandboxFlag "" — codex takes the prompt positionally
+		// (`codex exec [flags] <prompt>`), has no internal print-timeout (timeoutHeadroom
+		// 0 — the ctx deadline IS the timeout), and exposes no boolean sandbox param
+		// (allow_tools toggles read-only sandbox vs. the bypass flag instead).
+		description:    codexToolDescription,
+		allowToolsDesc: codexAllowToolsDescription,
+	},
 }
 
 // Named references into the registry, for tests. Derived from backends so they
@@ -244,6 +335,7 @@ var backends = []backend{
 var (
 	geminiBackend = backends[0]
 	claudeBackend = backends[1]
+	codexBackend  = backends[2]
 )
 
 // parseHopEnv reads the current delegation depth and max from a getenv-style
