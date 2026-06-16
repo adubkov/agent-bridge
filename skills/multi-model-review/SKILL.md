@@ -85,16 +85,24 @@ and report findings faithfully even when you disagree with them.
 ### 1. Gather the diff
 
 Run it yourself (`git diff @{upstream}...HEAD`, `git diff main...HEAD`, or a PR/
-path the user named) and **embed the diff text inline** in each finder's `task`.
-Do NOT tell the sub-agents to run git or read files — that would force
-`allow_tools: true` (unattended execution). Inline keeps every finder
-**reason-only and safe**. If the diff is very large, scope to the files in review.
+path the user named) and **embed the diff text inline, verbatim** in each finder's
+`task` — do **not** summarize, paraphrase, or truncate it. A lossy diff makes
+finders flag phantom issues (e.g. a section that only *looks* missing because you
+trimmed it) and miss real ones. Embedding keeps the review self-contained and
+reproducible and keeps every finder to **reason-only — no file writes, no
+state-changing commands**. (Per-backend nuance: `gemini_agent` / `claude_agent`
+reason-only genuinely *can't* read the repo at all; `codex_agent` reason-only is a
+`--sandbox read-only` mode that technically *could* read the repo, but you still
+hand it the diff inline so all finders judge the same scoped input.) If the diff is
+very large, narrow scope by dropping *whole files* — never by compressing the diff
+text.
 
 ### 2. Fan out finders (reason-only, in parallel)
 
 For each reviewer model, call its tool with the finder prompt below, the diff
-embedded. **Send them in a single message (parallel tool calls)** so they run
-concurrently.
+embedded. **Issue them in a single message** — a host that runs independent tool
+calls concurrently (e.g. Claude Code) then fans them out in parallel; a host that
+serializes tool calls still runs them all, just one after another.
 
 | Param | Value |
 |---|---|
@@ -125,13 +133,14 @@ Tag each returned finding with the **finder model** that produced it.
 Pool all candidates and assign each a **verifier model ≠ the finder model**
 (round-robin across the participating models: e.g. gemini→claude, claude→codex,
 codex→gemini; with two models, just use the other). Then **dispatch every verifier
-call in a single message (parallel tool calls)**, each reason-only with the diff
-embedded — just like the finder wave, the verifiers run concurrently.
+call in a single message**, each reason-only with the diff embedded — just like the
+finder wave.
 
-This is a **two-wave** pipeline: finders all run in parallel, then verifiers all run
-in parallel. The one unavoidable wait is *between* the waves — a finding can't be
-verified before it exists — so total time ≈ slowest finder + slowest verifier, not
-the sum of all calls.
+This is a **two-wave** pipeline: all finders, then all verifiers. The one
+unavoidable wait is *between* the waves — a finding can't be verified before it
+exists. On a host that dispatches tool calls concurrently (e.g. Claude Code) each
+wave runs in parallel, so total time ≈ slowest finder + slowest verifier; on a host
+that serializes tool calls the two waves still hold but wall-clock is the sum.
 
 **Verifier prompt template:**
 
@@ -224,10 +233,16 @@ Antigravity host on `claude_agent` + `codex_agent`).
 - **JSON robustness.** Models sometimes wrap JSON in prose or ``` fences. Instruct
   "ONLY JSON" (the templates do) and parse defensively — extract the largest JSON
   array/object from the reply rather than assuming the whole reply is JSON.
-- **Inline-only context.** Reason-only finders see only the embedded diff, not the
-  surrounding repo. If a finding clearly needs wider context, you can re-run that
-  one finder with `allow_tools: true` and a scoped `working_dir` for a repo-aware
-  pass — heavier and opt-in, not the default.
+- **Inline-only context, and what it takes to widen it.** `gemini_agent` /
+  `claude_agent` reason-only see *only* the embedded diff — they cannot read the
+  repo. `codex_agent` reason-only is a `--sandbox read-only` mode, so it *can*
+  already read the repo and run read-only commands; you still give it the diff
+  inline for a uniform, scoped input. If a finding genuinely needs wider context:
+  with `codex_agent`, reason-only already permits repo reads; with `gemini_agent` /
+  `claude_agent` there is **no read-only tier** — `allow_tools: true` grants *full
+  unattended execution* (`--dangerously-skip-permissions`: file writes + arbitrary
+  commands, and `claude_agent` has no sandbox at all), so reach for it sparingly and
+  always scope it with `working_dir`.
 - **Delegation depth.** Fanning out spawns child agents; the bridge's hop guard
   (`AGENT_HOP_MAX`) caps nesting. Reason-only finders cannot spawn further, so a
   single review round stays shallow.
