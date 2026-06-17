@@ -7,15 +7,29 @@
     "email": "alexey@dubkov.com"
   },
   "repository": "https://github.com/adubkov/agent-bridge",
-  "keywords": ["mcp", "gemini", "claude", "codex", "antigravity", "agy", "bridge", "subagent", "code-review"],
+  "keywords": [
+    "mcp",
+    "gemini",
+    "claude",
+    "codex",
+    "antigravity",
+    "agy",
+    "bridge",
+    "subagent",
+    "code-review"
+  ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Bridge",
     "shortDescription": "Spawn Gemini/Claude/Codex sub-agents; run cross-model reviews",
-    "longDescription": "Exposes gemini_agent, claude_agent, and codex_agent as MCP tools so any host agent can spawn a sub-agent in another model family, and ships skills for delegating work to Gemini and for running multi-model (cross-family) code reviews of a diff. The MCP tools are registered separately with `codex mcp add` (see the repo README); this plugin surfaces the skills.",
+    "longDescription": "Exposes gemini_agent, claude_agent, and codex_agent as MCP tools so any host agent can spawn a sub-agent in another model family, and ships skills for delegating work to Gemini and for running multi-model (cross-family) code reviews of a diff. Installing this plugin registers both the bundled MCP server and the skills.",
     "developerName": "Alexey Dubkov",
     "category": "Engineering",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Run a cross-model review of my current diff.",
       "Delegate this task to a Gemini sub-agent."

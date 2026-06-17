@@ -219,19 +219,19 @@ needs two things in place:
 **1. The bridge MCP tools are connected**, so `gemini_agent` / `claude_agent` /
 `codex_agent` are callable from your session:
 
-- **Claude Code:** `make install-claude` (tools only) or `make plugin-install`
-  (tools + skills).
+- **Claude Code:** `make install-claude` — installs the plugin (tools + skills) from a
+  local marketplace; `claude plugin install` copies the binary into a frozen, versioned
+  cache, so the install doesn't track your checkout. (Tools only, no skills? `claude mcp
+  add agent-bridge --scope user -- /abs/path/to/agent-bridge-mcp` by hand — not frozen.)
 - **Antigravity (Gemini, via the `agy` CLI):** `make install-agy` — imports the MCP
   server *and* this skill. Use the make target, not a bare `agy plugin install
   <repo>`: `agy` copies the plugin manifests but not the built binary and does not
-  expand Claude's `${CLAUDE_PLUGIN_ROOT}`, so the imported MCP command still points
-  at an unexpanded `${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp` path and the server won't
-  launch until it is repointed at the absolute binary — which is exactly the extra
-  step `make install-agy` performs.
-- **Codex:** `make install-codex` — registers the MCP tools (`codex mcp add`, pointed at
-  the absolute repo binary) *and* this skill (via a local Codex plugin marketplace). To
-  wire up only the tools by hand: `codex mcp add agent-bridge -- /abs/path/to/agent-bridge-mcp`
-  (Codex supports external stdio MCP servers).
+  expand Claude's `${CLAUDE_PLUGIN_ROOT}`, so the make target installs a frozen copy of
+  the binary into agy's own plugin dir and repoints the imported MCP command at it.
+- **Codex:** `make install-codex` — installs the plugin (tools + skill) from a local
+  Codex marketplace. The MCP server is **bundled in the plugin** (its `.mcp.json` resolves
+  `./agent-bridge-mcp` relative to the install), so `codex plugin add` copies the binary
+  into Codex's frozen cache and wires up the tools — no separate `codex mcp add`.
 
 Then call the tools for the models you want as reviewers — for diversity, prefer
 families other than your host (from a Codex host lean on `gemini_agent` +
@@ -246,8 +246,9 @@ Antigravity host on `claude_agent` + `codex_agent`).
   (`.agents/plugins/marketplace.json` + `plugins/agent-bridge/.codex-plugin/plugin.json`),
   so Codex surfaces the skill from its `description` just like Claude/Antigravity. Codex
   **cannot** consume this repo's Claude-format `.claude-plugin/` marketplace, and it
-  requires a plugin's skills to live *inside* the plugin root, so the make target ships a
-  Codex marketplace and copies the canonical `./skills` into the plugin dir for you.
+  requires a plugin's skills (and bundled MCP binary) to live *inside* the plugin root, so
+  the make target ships a Codex marketplace and copies the canonical `./skills` and the
+  built binary into the plugin dir for you.
   (Prefer not to install a plugin? You can still carry the playbook by hand — drop it into
   Codex's standing-instructions file `AGENTS.md` (per project or `~/.codex/AGENTS.md`), or
   paste the steps as the task prompt; nothing host-specific is required to *follow* the
