@@ -1019,17 +1019,19 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 	}
 }
 
-// TestRunAgentKillsGrandchild reproduces the grandchild-pipe hang: the fake
-// child backgrounds a grandchild that inherits stdout and sleeps far past the
-// deadline, then blocks itself. Without process-group kill + WaitDelay, the
-// grandchild holds the stdout pipe open and cmd.Run() blocks for the
-// grandchild's full lifetime. The fix must make runAgent return promptly.
+// TestRunAgentKillsGrandchild reproduces the grandchild-pipe hang on the PLAIN-PIPE
+// runner (claude/codex): the fake child backgrounds a grandchild that inherits stdout
+// and sleeps far past the deadline, then blocks itself. Without process-group kill +
+// WaitDelay, the grandchild holds the stdout pipe open and cmd.Run() blocks for the
+// grandchild's full lifetime. The fix must make runAgent return promptly. (The pty
+// runner's equivalent — antigravity — is covered by TestRunAgentKillsGrandchildPTY in
+// the unix-tagged test file, since the pty path only exists there.)
 func TestRunAgentKillsGrandchild(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
 	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
-	tb := withBin(t, antigravityBackend, bin)
+	tb := withBin(t, claudeBackend, bin)        // pipe backend: exercises setupProcessGroup + WaitDelay
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 
 	type out struct {

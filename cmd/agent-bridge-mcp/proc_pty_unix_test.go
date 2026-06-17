@@ -7,6 +7,9 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // TestRunOnPTYAllocatesTTY is the regression test for the agy headless-hang bug:
@@ -57,5 +60,45 @@ func TestRunAgentPTYMergesStderr(t *testing.T) {
 	}
 	if txt := resultText(t, res); !strings.Contains(txt, "BOOM-on-stderr") {
 		t.Errorf("pty failure must surface the child's stderr via the merged stream; got:\n%s", txt)
+	}
+}
+
+// TestRunAgentKillsGrandchildPTY is the pty-path twin of TestRunAgentKillsGrandchild
+// (which covers the plain-pipe runner): the antigravity backend is pty-run, so a
+// backgrounded grandchild inherits the pty SLAVE rather than a pipe. runOnPTY must
+// still return promptly — its session-wide SIGKILL takes out the grandchild, and if
+// one escaped the session the grace-period master close unblocks the io.Copy drain.
+// Without that, the grandchild holds the slave open and the drain wedges past the
+// deadline. This lives in the unix-tagged file because the pty path only exists here.
+func TestRunAgentKillsGrandchildPTY(t *testing.T) {
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+
+	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
+	tb := withBin(t, antigravityBackend, bin)
+	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
+
+	type out struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 0})
+		ch <- out{res, err}
+	}()
+
+	// Comfortably under the 30s grandchild sleep but above the 150ms deadline + the
+	// grace-period master close, so a real hang is unambiguous.
+	select {
+	case o := <-ch:
+		if o.err != nil {
+			t.Fatalf("expected a tool result, got Go error: %v", o.err)
+		}
+		if o.res == nil || !o.res.IsError || !strings.Contains(resultText(t, o.res), "timed out") {
+			t.Fatalf("expected a timeout error result, got %+v", o.res)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("runAgent hung: a grandchild holding the pty slave blocked runOnPTY past the deadline")
 	}
 }
