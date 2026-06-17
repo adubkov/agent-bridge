@@ -107,7 +107,7 @@ time: `[<tool> | <modeNote> | <elapsed>]`.
 
 ### Loop guard (`AGENT_HOP_DEPTH` / `AGENT_HOP_MAX`)
 
-Because the two tools can call each other (Claude → Gemini → Claude → …), the
+Because these tools can call each other (Claude → Gemini → Claude → …), the
 shared run path enforces a delegation-depth limit to prevent runaway A→B→A→B
 chains. It reads two environment variables:
 
@@ -127,6 +127,14 @@ On each call:
 
 Set `AGENT_HOP_MAX` in the MCP server's environment to allow deeper (or shallower)
 delegation chains. Invalid/missing values fall back to the defaults above.
+
+In addition, every **reason-only** child (`allow_tools: false`) is spawned with
+`AGENT_NO_DELEGATE=1`, and the run path refuses to spawn from any process carrying that
+flag. This is a hard "no further delegation" stop, independent of the depth counter: a
+reason-only agent (which should only reason, not act) cannot re-enter the bridge to spawn
+a child — including `codex_agent`'s read-only sandbox, which can still run read-only
+commands. Acting children (`allow_tools: true`) do not carry the flag and may delegate,
+bounded by the hop guard above.
 
 ## Build
 
@@ -266,6 +274,32 @@ The plugin bundles:
 - `skills/agent-bridge/SKILL.md` — guidance for Claude on delegating tasks
   (when to use it, the two modes, how to write a good `task`, and "always verify
   the output").
+
+## Install into Codex
+
+Use this when the **parent** is OpenAI Codex (so Codex can delegate to Gemini/Claude via
+`gemini_agent` / `claude_agent`). `make install-codex` registers the MCP tools **and**
+surfaces the skill:
+
+```sh
+make install-codex      # build + codex mcp add (abs binary) + codex plugin marketplace add + codex plugin add
+codex mcp list          # confirm the agent-bridge MCP server
+codex plugin list       # confirm agent-bridge@agent-bridge-local is installed/enabled
+# remove later with:
+make uninstall-codex
+```
+
+Codex **cannot** consume this repo's Claude-format `.claude-plugin/` marketplace, so the
+target ships a Codex-format one:
+
+- `.agents/plugins/marketplace.json` — single-plugin Codex marketplace (`agent-bridge-local`).
+- `plugins/agent-bridge/.codex-plugin/plugin.json` — the Codex plugin manifest
+  (skills are surfaced via its `skills` field).
+
+Codex requires a plugin's skills to live **inside** the plugin root (its validator forbids
+`..`/symlink escapes), so the canonical `./skills` are copied into `plugins/agent-bridge/skills/`
+(gitignored) by `make install-codex`. The MCP command is the absolute repo binary, because
+Codex does not expand Claude's `${CLAUDE_PLUGIN_ROOT}` — same reasoning as `install-agy`.
 
 ## Build (Makefile)
 

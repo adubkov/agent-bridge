@@ -1,6 +1,6 @@
 ---
 name: multi-model-review
-description: Use when the user wants a CROSS-MODEL / multi-model code review of a diff — fan the change out to several different models (Gemini, Claude, Codex) as independent reviewers via the agent-bridge MCP tools, then cross-verify each finding with a DIFFERENT model before reporting. Good for high-stakes diffs where you want uncorrelated model perspectives, not just one model's opinion. Host-agnostic: the orchestrator can be a Claude Code, Antigravity (Gemini), or Codex session. Requires the agent-bridge MCP server (tools `gemini_agent` / `claude_agent` / `codex_agent`).
+description: Use when the user wants a CROSS-MODEL / multi-model code review of a diff — fan the change out to several different models (Gemini, Claude, Codex) as independent reviewers via the agent-bridge MCP tools, then cross-verify each finding with a DIFFERENT model before reporting. Good for high-stakes diffs where you want uncorrelated model perspectives, not just one model's opinion. Host-agnostic — the orchestrator can be a Claude Code, Antigravity (Gemini), or Codex session. Requires the agent-bridge MCP server (tools `gemini_agent` / `claude_agent` / `codex_agent`).
 ---
 
 # Multi-model code review (via agent-bridge)
@@ -228,7 +228,9 @@ needs two things in place:
   at an unexpanded `${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp` path and the server won't
   launch until it is repointed at the absolute binary — which is exactly the extra
   step `make install-agy` performs.
-- **Codex:** `codex mcp add agent-bridge -- /abs/path/to/agent-bridge-mcp`
+- **Codex:** `make install-codex` — registers the MCP tools (`codex mcp add`, pointed at
+  the absolute repo binary) *and* this skill (via a local Codex plugin marketplace). To
+  wire up only the tools by hand: `codex mcp add agent-bridge -- /abs/path/to/agent-bridge-mcp`
   (Codex supports external stdio MCP servers).
 
 Then call the tools for the models you want as reviewers — for diversity, prefer
@@ -240,15 +242,16 @@ Antigravity host on `claude_agent` + `codex_agent`).
 
 - **Claude Code / Antigravity:** loaded as a skill by the plugin install above —
   it triggers from the `description`.
-- **Codex:** Codex *does* have a plugin/marketplace system (`codex plugin
-  marketplace add` + `codex plugin add`), but it expects a **Codex-format** plugin
-  (`.codex-plugin/plugin.json` plus Codex marketplace entries) and **cannot consume
-  this repo's Claude-format `.claude-plugin/` marketplace** — so it will not surface
-  this skill. Register the bridge tools the MCP way (`codex mcp add …` above), and
-  carry the playbook by dropping it into Codex's standing-instructions file
-  (`AGENTS.md`, per project or `~/.codex/AGENTS.md`) or pasting the steps as the task
-  prompt. Nothing host-specific is required to *follow* the pipeline — it is just the
-  steps above plus the bridge tools.
+- **Codex:** `make install-codex` installs this repo as a **Codex-format** plugin
+  (`.agents/plugins/marketplace.json` + `plugins/agent-bridge/.codex-plugin/plugin.json`),
+  so Codex surfaces the skill from its `description` just like Claude/Antigravity. Codex
+  **cannot** consume this repo's Claude-format `.claude-plugin/` marketplace, and it
+  requires a plugin's skills to live *inside* the plugin root, so the make target ships a
+  Codex marketplace and copies the canonical `./skills` into the plugin dir for you.
+  (Prefer not to install a plugin? You can still carry the playbook by hand — drop it into
+  Codex's standing-instructions file `AGENTS.md` (per project or `~/.codex/AGENTS.md`), or
+  paste the steps as the task prompt; nothing host-specific is required to *follow* the
+  pipeline.)
 
 ## Caveats
 
@@ -274,15 +277,18 @@ Antigravity host on `claude_agent` + `codex_agent`).
   `working_dir`. For `gemini_agent` you can contain it further with `sandbox: true` —
   edits land in an isolated scratch dir instead of `working_dir`; `claude_agent` has
   no sandbox at all, so `working_dir` is its only scoping.
-- **Delegation depth.** Fanning out spawns child agents, so the structural cap on
-  nesting is the bridge's **hop guard**: it reads `AGENT_HOP_DEPTH`, refuses to spawn
-  once the depth reaches `AGENT_HOP_MAX` (default 2), and spawns each child with the
-  depth incremented — so a runaway A→B→A chain is bounded no matter what any reviewer
-  does. Reason-only mode is a *secondary, partial* safeguard, not a substitute:
-  `gemini_agent` / `claude_agent` reason-only have no tools at all, so they genuinely
-  cannot spawn a child; `codex_agent` reason-only is a `--sandbox read-only` mode that
-  still permits read-only command execution, so "it can't spawn a child" is not a
-  guarantee the sandbox gives you — the hop guard is what actually keeps a review
-  round shallow.
+- **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep
+  a review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
+  `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and
+  increments it for each child — bounding any A→B→A chain regardless of what an acting
+  agent does. (2) Every reason-only child (the finders/verifiers here) is spawned with
+  `AGENT_NO_DELEGATE=1`, and the bridge refuses to spawn from a process carrying that
+  flag — so a reason-only reviewer genuinely **cannot** delegate further, including
+  `codex_agent`'s read-only sandbox (which can still run read-only commands). A single
+  review round, being all reason-only, therefore can't nest at all.
+- **Tool behavior is authoritative in the tool descriptions.** This skill summarizes what
+  each backend's reason-only / `allow_tools` / `working_dir` / `sandbox` modes do, but the
+  bridge's own MCP tool descriptions (generated from `cmd/agent-bridge-mcp/main.go`) are
+  the source of truth — if they ever diverge from this summary, trust them.
 - **Diversity is the point.** Prefer different families. If only one CLI is
   connected, this is a single-model review; report it as such.

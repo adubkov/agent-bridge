@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # the absolute repo binary. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy plugin-install plugin-uninstall help
+.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex plugin-install plugin-uninstall help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). This is the canonical artifact: the plugin's
@@ -108,6 +108,32 @@ install-agy: build
 uninstall-agy:
 	-agy plugin uninstall $(PLUGIN)
 	@echo "removed $(PLUGIN) from agy."
+
+## install-codex: register the bridge with Codex — the MCP tools via `codex mcp add`
+##               AND this repo's skills via a local Codex plugin marketplace
+##               (.agents/plugins/marketplace.json + plugins/$(PLUGIN)/.codex-plugin).
+##               Codex requires a plugin's skills to live INSIDE the plugin root (its
+##               validator forbids `..`/symlink escapes), so the canonical ./skills are
+##               copied into ./plugins/$(PLUGIN)/skills (gitignored) first. The MCP
+##               command is the absolute repo binary (Codex has no ${CLAUDE_PLUGIN_ROOT}),
+##               matching install-claude/install-agy. Restart Codex after.
+install-codex: build
+	@rm -rf plugins/$(PLUGIN)/skills && mkdir -p plugins/$(PLUGIN)/skills
+	@cp -R skills/. plugins/$(PLUGIN)/skills/
+	-codex mcp remove agent-bridge
+	codex mcp add agent-bridge -- $(CURDIR)/$(BINARY)
+	-codex plugin marketplace remove $(MARKETPLACE)
+	codex plugin marketplace add $(CURDIR)
+	codex plugin add $(PLUGIN)@$(MARKETPLACE)
+	@echo "registered 'agent-bridge' with Codex (MCP: gemini_agent + claude_agent + codex_agent — from Codex use gemini_agent or claude_agent; skill: multi-model-review). Restart Codex, then 'codex mcp list' + 'codex plugin list' to confirm."
+
+## uninstall-codex: remove the bridge from Codex (MCP tools, plugin, and marketplace)
+uninstall-codex:
+	-codex plugin remove $(PLUGIN)@$(MARKETPLACE)
+	-codex plugin marketplace remove $(MARKETPLACE)
+	-codex mcp remove agent-bridge
+	@rm -rf plugins/$(PLUGIN)/skills
+	@echo "removed $(PLUGIN) from Codex."
 
 ## clean: remove the built binary
 clean:
