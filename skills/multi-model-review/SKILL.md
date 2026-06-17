@@ -71,8 +71,9 @@ own findings as just another independent reviewer.
 
 **Residual:** even as a pure coordinator, an author-orchestrator can still bias the
 *synthesis* — waving off a real finding as "intended." Mitigate structurally: trust
-the cross-model verdicts (a finding two *other* models CONFIRM is hard to dismiss)
-and report findings faithfully even when you disagree with them.
+the cross-model verdict (a finding another model CONFIRMs is hard to dismiss — and
+the two-vote variant in step 3 makes it harder still) and report findings faithfully
+even when you disagree with them.
 
 ## Pipeline
 
@@ -90,8 +91,10 @@ path the user named) and **embed the diff text inline, verbatim** in each finder
 finders flag phantom issues (e.g. a section that only *looks* missing because you
 trimmed it) and miss real ones. Embedding keeps the review self-contained and
 reproducible and keeps every finder to **reason-only — no file writes, no
-state-changing commands**. (Per-backend nuance: `gemini_agent` / `claude_agent`
-reason-only genuinely *can't* read the repo at all; `codex_agent` reason-only is a
+state-changing commands**. (Per-backend nuance: as spawned by the finder step —
+reason-only, no `working_dir`/`add_dirs` — `gemini_agent` / `claude_agent` finders
+have nothing but the inline diff to go on: reason-only blocks unattended file edits
+and command execution, and nothing wires the repo in. `codex_agent` reason-only is a
 `--sandbox read-only` mode that technically *could* read the repo, but you still
 hand it the diff inline so all finders judge the same scoped input.) If the diff is
 very large, narrow scope by dropping *whole files* — never by compressing the diff
@@ -132,9 +135,10 @@ Tag each returned finding with the **finder model** that produced it.
 
 Pool all candidates and assign each a **verifier model ≠ the finder model**
 (round-robin across the participating models: e.g. gemini→claude, claude→codex,
-codex→gemini; with two models, just use the other). Then **dispatch every verifier
-call in a single message**, each reason-only with the diff embedded — just like the
-finder wave.
+codex→gemini; with two models, just use the other; with only one model connected you
+cannot cross-verify at all — use Fast mode and report it as a single-model review).
+Then **dispatch every verifier call in a single message**, each reason-only with the
+diff embedded — just like the finder wave.
 
 This is a **two-wave** pipeline: all finders, then all verifiers. The one
 unavoidable wait is *between* the waves — a finding can't be verified before it
@@ -158,6 +162,15 @@ that serializes tool calls the two waves still hold but wall-clock is the sum.
 Keep **CONFIRMED** and **PLAUSIBLE**; drop **REFUTED**. (Prototype: one cross-vote
 per finding. For higher confidence, send to BOTH other models and require a
 majority — note the extra cost.)
+
+**Diff-scoped reviewers.** `gemini_agent` / `claude_agent` finders and verifiers see
+only the inline diff, so they can't check call sites or guards that live outside it.
+Read the templates' "broken call sites" and "guarded elsewhere (quote the guard)" as
+scoped to what the diff shows: a diff-only verifier that can't find a guard should
+answer **PLAUSIBLE**, not REFUTED — a guard it can't see is not proof there is none.
+When out-of-diff context is essential to a verdict, route that finding to a
+repo-reading reviewer (`codex_agent`, whose reason-only `--sandbox read-only` mode
+already reads the repo).
 
 ### 4. Synthesize
 
@@ -233,21 +246,24 @@ Antigravity host on `claude_agent` + `codex_agent`).
 - **JSON robustness.** Models sometimes wrap JSON in prose or ``` fences. Instruct
   "ONLY JSON" (the templates do) and parse defensively — extract the largest JSON
   array/object from the reply rather than assuming the whole reply is JSON.
-- **Inline-only context, and what it takes to widen it.** `gemini_agent` /
-  `claude_agent` reason-only see *only* the embedded diff — they cannot read the
-  repo. `codex_agent` reason-only is a `--sandbox read-only` mode, so it *can*
-  already read the repo and run read-only commands; you still give it the diff
-  inline for a uniform, scoped input. If a finding genuinely needs wider context:
-  with `codex_agent`, reason-only already permits repo reads; with `gemini_agent` /
-  `claude_agent` there is **no read-only tier** — `allow_tools: true` grants *full
-  unattended execution* (`--dangerously-skip-permissions`: file writes + arbitrary
-  commands), so reach for it sparingly and scope it with `working_dir`. For
-  `gemini_agent` you can contain it further with `sandbox: true` — edits land in an
-  isolated scratch dir instead of `working_dir`; `claude_agent` has no sandbox at
-  all, so `working_dir` is its only scoping.
+- **Inline-only context, and what it takes to widen it.** As spawned by the finder
+  step (reason-only, no `working_dir`/`add_dirs`), `gemini_agent` / `claude_agent`
+  finders have only the embedded diff to reason over — reason-only blocks unattended
+  file edits and command execution, and nothing wires the repo in. `codex_agent`
+  reason-only is a `--sandbox read-only` mode, so it *can* already read the repo and
+  run read-only commands; you still give it the diff inline for a uniform, scoped
+  input. If a finding genuinely needs wider context: with `codex_agent`, reason-only
+  already permits repo reads; `gemini_agent` / `claude_agent` have **no read-only
+  sandbox tier** like codex's, so `allow_tools: true` is the only way to let them act
+  — it grants *full unattended execution* (`--dangerously-skip-permissions`: file
+  writes + arbitrary commands), so reach for it sparingly and scope it with
+  `working_dir`. For `gemini_agent` you can contain it further with `sandbox: true` —
+  edits land in an isolated scratch dir instead of `working_dir`; `claude_agent` has
+  no sandbox at all, so `working_dir` is its only scoping.
 - **Delegation depth.** Fanning out spawns child agents; the bridge's hop guard
   (`AGENT_HOP_MAX`) caps nesting *depth*. Reason-only finders are a separate
-  safeguard: `gemini_agent` / `claude_agent` reason-only have no tools at all, and
+  safeguard: `gemini_agent` / `claude_agent` reason-only cannot take unattended
+  actions (no file edits / command execution), and
   `codex_agent` reason-only is a `--sandbox read-only` mode (reads and read-only
   commands, no state-changing actions) — so none of them can perform the
   state-changing spawn of a child agent, and a single review round stays shallow
