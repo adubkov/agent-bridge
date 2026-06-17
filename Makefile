@@ -67,14 +67,18 @@ smoke-antigravity smoke-claude smoke-codex: smoke-%: build
 ##                 so it is not frozen.)
 install-claude: build
 	-claude plugin marketplace remove $(MARKETPLACE)
-	claude plugin marketplace add $(CURDIR)
+	claude plugin marketplace add "$(CURDIR)"
 	claude plugin install $(PLUGIN)@$(MARKETPLACE)
 	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Claude Code (skills + MCP: antigravity_agent + claude_agent + codex_agent, frozen cache copy — from Claude use antigravity_agent or codex_agent). Restart Claude Code, then /mcp + /plugin to confirm."
 
-## uninstall-claude: remove the plugin and its local marketplace from Claude Code
+## uninstall-claude: remove the plugin and its local marketplace from Claude Code.
+##                   Also clears any legacy direct MCP registration (`claude mcp add
+##                   agent-bridge`) left by an older install-claude or the manual
+##                   tools-only fallback, so no stale server lingers after uninstall.
 uninstall-claude:
 	-claude plugin uninstall $(PLUGIN)@$(MARKETPLACE)
 	-claude plugin marketplace remove $(MARKETPLACE)
+	-claude mcp remove agent-bridge --scope user
 	@echo "removed $(PLUGIN) and marketplace $(MARKETPLACE) from Claude Code."
 
 ## install-agy: import this repo's plugin into the Antigravity `agy` CLI, then install a
@@ -86,9 +90,9 @@ uninstall-claude:
 ##             frozen — rebuilding the checkout won't change a running agent; re-run to
 ##             update. Restart Antigravity after.
 install-agy: build
-	agy plugin install $(CURDIR)
+	agy plugin install "$(CURDIR)"
 	@if [ -d "$(AGY_PLUGIN_DIR)" ]; then \
-	  cp $(CURDIR)/$(BINARY) "$(AGY_PLUGIN_DIR)/$(BINARY)" && echo "installed frozen binary -> $(AGY_PLUGIN_DIR)/$(BINARY)"; \
+	  cp "$(CURDIR)/$(BINARY)" "$(AGY_PLUGIN_DIR)/$(BINARY)" && echo "installed frozen binary -> $(AGY_PLUGIN_DIR)/$(BINARY)"; \
 	else \
 	  echo "WARNING: $(AGY_PLUGIN_DIR) not found; agy plugin layout may differ (pass AGY_PLUGIN_DIR=...)."; \
 	fi
@@ -119,9 +123,9 @@ uninstall-agy:
 install-codex: build
 	@rm -rf plugins/$(PLUGIN)/skills && mkdir -p plugins/$(PLUGIN)/skills
 	@cp -R skills/. plugins/$(PLUGIN)/skills/
-	@cp $(CURDIR)/$(BINARY) plugins/$(PLUGIN)/$(BINARY)
+	@cp "$(CURDIR)/$(BINARY)" "plugins/$(PLUGIN)/$(BINARY)"
 	-codex plugin marketplace remove $(MARKETPLACE)
-	codex plugin marketplace add $(CURDIR)
+	codex plugin marketplace add "$(CURDIR)"
 	codex plugin add $(PLUGIN)@$(MARKETPLACE)
 	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Codex (skill + MCP: antigravity_agent + claude_agent + codex_agent, bundled & frozen — from Codex use antigravity_agent or claude_agent). Restart Codex, then 'codex plugin list' + 'codex mcp list' to confirm."
 
