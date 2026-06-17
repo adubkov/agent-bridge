@@ -37,8 +37,8 @@ Spawns an Antigravity agent (Google's `agy` CLI), which runs Gemini models.
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
-| `mode` | string | `reason` | Access tier: `reason` (no permission-bypass flag; but agy has **no** tool-disable flag and does **not** gate writes, so a `reason` agent with a writable `working_dir` can still read **and** edit files unattended — pass `sandbox: true` to confine writes, or omit `working_dir`) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for `antigravity_agent`. |
-| `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Antigravity-only** — `claude_agent` has no `sandbox` param. |
+| `mode` | string | `reason` | Access tier: `reason` (no permission-bypass flag; but agy has **no** tool-disable flag and does **not** gate writes, so a `reason` agent with a writable `working_dir` can still read **and** edit files unattended — use a throwaway `working_dir`, or omit it, to keep it off your files; `--sandbox` does **not** confine writes) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for `antigravity_agent`. |
+| `sandbox` | bool | **false** | Enable agy's sandbox terminal restrictions (`--sandbox`). **Note:** despite the name this does **not** confine the agent's *file* edits — a write under `--sandbox` still lands in `working_dir` (verified), so it is not a "don't touch my files" guard; use a throwaway `working_dir` for that. **Antigravity-only** — `claude_agent` has no `sandbox` param. |
 
 ## Tool: `claude_agent`
 
@@ -102,9 +102,10 @@ underlying CLI — `--dangerously-skip-permissions` for `claude`/`agy`,
 turning the child's approval gates off (unattended execution). Scope it with `working_dir`;
 the agent's edits land there.
 
-For `antigravity_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
-the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.
-Set `sandbox: true` only for a confined "compute but don't touch my files" run.
+For `antigravity_agent`, `--sandbox` is **off by default**. It enables agy's "terminal
+restrictions", but — despite the name — does **not** keep the agent's file edits out of
+`working_dir` (verified: a write under `--sandbox` still landed there). To keep agy off your
+files, point `working_dir` at a throwaway dir (or omit it), not `--sandbox`.
 `claude_agent` has no sandbox concept.
 
 **`codex_agent` differs:** Codex has no pure no-tools mode, so `mode: "reason"` and

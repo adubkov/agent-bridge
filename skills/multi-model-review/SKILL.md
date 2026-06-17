@@ -158,15 +158,20 @@ input across finders.
   |---|---|---|
   | `claude_agent` | `mode: "read"` | `--permission-mode plan`: read/grep/glob + read-only Bash (incl. `git diff`); no edits or commands. |
   | `codex_agent` | `mode: "read"` | `--sandbox read-only`: reads + read-only commands; no writes. |
-  | `antigravity_agent` | `mode: "reason"` **+ `sandbox: true`** | agy has no read tier, and its `reason` mode **does not block writes** — it will edit files unattended if pointed at a writable `working_dir`. `sandbox: true` confines any write to a throwaway scratch dir while reads of `working_dir` and read-only `git` still work, and `reason` keeps the delegation freeze. (Do **not** use `mode: "act"`+`sandbox`: also write-safe, but `act` forfeits the freeze — see Delegation.) |
+  | `antigravity_agent` | `mode: "reason"`, **no `sandbox`**, `working_dir` = a **throwaway `git worktree`** (not your live checkout) | agy has no read-only tier and `reason` **does not block writes** — it edits files unattended in a writable `working_dir`, and it routinely saves a scratch `git diff` dump into `working_dir` while reviewing. `--sandbox` is **not** the guard it looks like: it applies "terminal restrictions" but does **not** keep agy's file edits out of `working_dir` (verified — a write under `sandbox: true` landed in `working_dir`), so it buys no safety here. Protect your tree *structurally* instead: point agy at a disposable worktree; its scratch writes and any stray edits stay there. `reason` keeps the delegation freeze, and the bridge runs agy under a pty so its agentic loop completes (headless it would hang). |
 
   Always add an **enforcing line** to the `task`: *"Inspect only — do not edit, create, or
   delete files, do not run state-changing commands, and do not delegate to other agents."*
-  For agy the sandbox is the real guarantee and the line is defense-in-depth; for
-  claude/codex the mode already enforces it.
+  For agy the throwaway worktree is the real guarantee and the line is defense-in-depth; for
+  claude/codex the read mode already enforces it.
 
 First make sure the repo is in the state you want reviewed — the PR branch checked out and
-the base ref present locally — since each reviewer reads the live working tree.
+the base ref present locally — since each reviewer reads the live working tree. **For agy
+specifically**, create a throwaway worktree and use it as agy's `working_dir`:
+`git worktree add --detach /tmp/review-wt HEAD` (it shares the repo's objects and refs, so
+`git diff <base>...<head>` still resolves inside it); remove it with `git worktree remove`
+afterward. This keeps agy's scratch dumps and any unattended edits off your real checkout —
+claude/codex `read` mode is write-safe and can read the live checkout directly.
 
 **Context is now (almost) free.** Because reviewers read the repo, the old "how much diff
 to embed" ladder mostly dissolves: each can pull `--function-context`, open whole files,
@@ -185,10 +190,12 @@ strictly byte-identical input across finders. In inline mode keep finders reason
 (omit `mode`) with no `working_dir`, and tell them to reason only over the inline diff.
 (Per-backend reason-only nuance there: `claude_agent` passes `--tools ""` → genuinely no
 tools; `codex_agent` is a read-only sandbox; `antigravity_agent` is the exception — it has
-no tool-disable flag and, with no `working_dir`, runs in the **bridge server's own cwd**,
+no tool-disable flag and `--sandbox` does **not** confine its writes (verified), so the only
+guard is *where it runs*: with no `working_dir` it runs in the **bridge server's own cwd**,
 which can itself be a writable tree (the host launches the server in your project), so an
-inline agy finder can still edit files unattended. Give agy `sandbox: true` even in inline
-mode to confine any write to a throwaway scratch dir.)
+inline agy finder can still edit files there. Prefer the repo-reading recipe above — agy in a
+throwaway worktree — over inline for agy; only run agy inline when the bridge server's cwd is
+not a tree you care about.)
 
 ### 2. Fan out finders (read-only, in parallel)
 
@@ -199,8 +206,8 @@ fans them out in parallel; a host that serializes still runs them all, one after
 | Param | Repo-reading (default) | Inline (fallback) |
 |---|---|---|
 | `task` | finder prompt + the exact diff command + the "inspect only" enforcing line | finder prompt + the verbatim embedded diff |
-| `mode` / `sandbox` | per the read-only recipe (claude/codex `read`; agy `reason` **+ `sandbox: true`**) | omit `mode` (reason-only); **agy still needs `sandbox: true`** (its cwd may be writable — see caveat) |
-| `working_dir` | the repo root (absolute path) | leave unset |
+| `mode` / `sandbox` | per the read-only recipe (claude/codex `read`; agy `reason`, **no sandbox**) | omit `mode` (reason-only); no sandbox |
+| `working_dir` | the repo root (absolute path) — **for agy, a throwaway `git worktree`** (see recipe) | leave unset |
 | `model` / `effort` | per **Model & effort selection** above (default `deep`; honor overrides) | same |
 | `timeout_seconds` | 300–600 (repo-reading is agentic — lean higher for big repos) | 300–600 |
 
@@ -209,8 +216,8 @@ fans them out in parallel; a host that serializes still runs them all, one after
 > command and the files in scope, tell it to review *only* that change (reading around it as
 > needed) and not to explore unrelated parts of the repo, and keep the enforcing "inspect
 > only — no edits, state-changing commands, or delegation" line in every prompt. (That line
-> is load-bearing for agy, whose sandbox confines writes but whose model is otherwise free
-> to roam; for claude/codex the read mode already blocks writes.)
+> is load-bearing for agy, which has no write-safe tier — the throwaway worktree, not any
+> sandbox, is what protects your tree; for claude/codex the read mode already blocks writes.)
 
 Give every model the **same brief** so the diversity comes from the model, not the prompt.
 (You can layer distinct angles later; start uniform.)
@@ -374,15 +381,23 @@ Antigravity host on `claude_agent` + `codex_agent`).
   usage quota), and reviewers can vary slightly in what they choose to read — so pin the
   **diff command** in every prompt so they all judge the same change. Use **inline mode**
   only when the change isn't in a reachable repo, or you need byte-identical input.
-- **`antigravity_agent` `reason` is NOT write-safe.** Unlike `claude_agent` (`--tools ""` →
-  no tools) and `codex_agent` (`--sandbox read-only`), agy's `reason` tier merely omits the
-  permission-bypass flag — but agy still performs **unattended file writes** non-
-  interactively when pointed at a writable `working_dir` (verified: it created a file). So a
-  repo-reading agy reviewer **must** add `sandbox: true`; the sandbox (not the absence of the
-  bypass flag) is what protects your tree. In *inline* mode no `working_dir` is wired in, so
-  agy runs in the bridge server's own cwd — but that cwd can itself be a writable tree (the
-  host typically launches the server in your project dir), so inline agy is **not** inherently
-  safe either; give it `sandbox: true` in inline mode too for a hard guarantee.
+- **`antigravity_agent` has no write-safe tier, and `--sandbox` is NOT one.** Unlike
+  `claude_agent` (`--tools ""` → no tools) and `codex_agent` (`--sandbox read-only`), agy's
+  `reason` tier merely omits the permission-bypass flag, and agy performs **unattended file
+  writes** in a writable `working_dir` (verified: it created a file; it also saves a scratch
+  `git diff` dump there while reviewing). `--sandbox` does **not** fix this: it is "terminal
+  restrictions", and agy's file edits still land in `working_dir`, not a scratch dir (verified
+  — a file written under `sandbox: true` appeared in `working_dir`). So protect your tree
+  *structurally*: run a repo-reading agy reviewer in a **throwaway `git worktree`** (step 1),
+  never your live checkout. In *inline* mode no `working_dir` is wired in, so agy runs in the
+  bridge server's own cwd — which can itself be writable, and sandbox won't confine that
+  either, so prefer the worktree repo-reading recipe for agy.
+- **`antigravity_agent` runs under a pty.** agy's agentic `--print` loop only completes with a
+  controlling terminal; spawned headless (plain pipes) it hangs until killed. The bridge gives
+  the agy backend a pseudo-terminal so reviews complete — transparent to you, but it is why an
+  agy reviewer works through the bridge at all. agy's per-review latency is also **highly
+  variable** (≈75–270s for the same Pro-tier repo review), so give agy generous
+  `timeout_seconds` (≥300) rather than reading a slow run as a hang.
 - **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep a
   review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
   `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and
