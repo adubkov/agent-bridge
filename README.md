@@ -37,7 +37,7 @@ Spawns a Gemini agent via the Antigravity `agy` CLI.
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
-| `allow_tools` | bool | **false** | Let the agent edit files in `working_dir` / run commands by auto-approving its permission prompts (`--dangerously-skip-permissions`). |
+| `mode` | string | `reason` | Access tier: `reason` (no tools) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. Legacy `allow_tools: true` ≡ `act`. |
 | `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Gemini-only** — `claude_agent` has no `sandbox` param. |
 
 ## Tool: `claude_agent`
@@ -55,7 +55,7 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
-| `allow_tools` | bool | **false** | Let the agent edit files in `working_dir` / run commands by auto-approving its permission prompts (`--dangerously-skip-permissions`). This is **unattended execution that consumes Claude credits**. |
+| `mode` | string | `reason` | Access tier: `reason` (no tools) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). Legacy `allow_tools: true` ≡ `act`. |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
 `--sandbox` is never passed to `claude`.
@@ -64,8 +64,8 @@ There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only 
 
 Spawns an **OpenAI Codex** agent via the `codex` CLI (`codex exec`). Codex's
 permission model differs from the others: it has **no pure "no tools" mode** — it
-always runs as an autonomous agent — so `allow_tools` toggles between a *read-only
-sandbox* and *full, unsandboxed access* rather than off/on.
+always runs as an autonomous agent — so `mode` toggles between a *read-only
+sandbox* (`reason`/`read`) and *full, unsandboxed access* (`act`) rather than off/on.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
@@ -75,9 +75,9 @@ sandbox* and *full, unsandboxed access* rather than off/on.
 | `timeout_seconds` | number | 300 (max 1800) | Codex `exec` has **no** internal timeout flag; the timeout is enforced purely by the process context deadline. |
 | `model` | string | provider default | Optional; `--model <model>` when non-empty. **Omit** to use Codex's recommended *frontier* model (most-capable, auto-current). |
 | `effort` | string | model default | Optional reasoning effort; passed as `-c model_reasoning_effort=<level>` when non-empty (e.g. `minimal\|low\|medium\|high`). |
-| `allow_tools` | bool | **false** | **false** → read-only sandbox (`--sandbox read-only`): Codex reads and reasons but cannot edit files or run effectful commands. **true** → passes `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access, edits landing in `working_dir`. |
+| `mode` | string | `reason` | Access tier: `reason`/`read` are **both** read-only (`--sandbox read-only`) — Codex reads/reasons but cannot edit or run effectful commands; `act` → `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access. Legacy `allow_tools: true` ≡ `act`. |
 
-There is **no `sandbox` param** on `codex_agent` — `allow_tools` already selects
+There is **no `sandbox` param** on `codex_agent` — `mode` already selects
 read-only vs. full access. Codex always runs with `--skip-git-repo-check` (so it
 works outside a Git repo). On success the tool returns Codex's final message;
 Codex's session banner and step-by-step transcript go to **stderr** and are
@@ -86,26 +86,28 @@ the other backends, not noisier).
 
 ### Safety model (all tools)
 
-By default the spawned agent is **reason/answer only** — it runs `--print` with no
-permission bypass, so it can analyze, draft, and answer but cannot take unattended
-actions. To let it actually act on your files/system, the caller must explicitly
-pass `allow_tools: true`, which passes `--dangerously-skip-permissions` to the
-underlying CLI (the child's approval gates are off — this is unattended
-execution). Scope it with `working_dir`; the agent's edits land there.
+By default (`mode: "reason"`) the spawned agent is **reason/answer only** — it runs
+`--print` with no permission bypass, so it can analyze, draft, and answer but cannot
+take unattended actions. `claude_agent` also offers `mode: "read"` — read-only
+exploration (read/grep files via `--permission-mode plan`, no edits or commands). To
+let an agent actually act on your files/system, set `mode: "act"`, which passes
+`--dangerously-skip-permissions` to the underlying CLI (the child's approval gates are
+off — this is unattended execution). Scope it with `working_dir`; the agent's edits
+land there. (Legacy `allow_tools: true` still works and is equivalent to `mode: "act"`.)
 
 For `gemini_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
 the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.
 Set `sandbox: true` only for a confined "compute but don't touch my files" run.
 `claude_agent` has no sandbox concept.
 
-**`codex_agent` differs:** Codex has no pure no-tools mode, so `allow_tools: false`
-runs it in a **read-only sandbox** (`--sandbox read-only`) — it can read and reason
-but not write — and `allow_tools: true` passes
+**`codex_agent` differs:** Codex has no pure no-tools mode, so `mode: "reason"` and
+`mode: "read"` both run it in a **read-only sandbox** (`--sandbox read-only`) — it can
+read and reason but not write — and `mode: "act"` passes
 `--dangerously-bypass-approvals-and-sandbox` (full access, no sandbox). Its
 result-header mode note reflects this (`tool-use: read-only (--sandbox read-only)`).
 
-The tool result header always reports which tool ran, the mode, and the elapsed
-time: `[<tool> | <modeNote> | <elapsed>]`.
+The tool result header always reports which tool ran, the mode, the model/effort
+requested, and the elapsed time: `[<tool> | <modeNote> | <model/effort> | <elapsed>]`.
 
 ### Loop guard (`AGENT_HOP_DEPTH` / `AGENT_HOP_MAX`)
 
@@ -130,13 +132,13 @@ On each call:
 Set `AGENT_HOP_MAX` in the MCP server's environment to allow deeper (or shallower)
 delegation chains. Invalid/missing values fall back to the defaults above.
 
-In addition, every **reason-only** child (`allow_tools: false`) is spawned with
+In addition, every **non-acting** child (`mode: "reason"` or `"read"`) is spawned with
 `AGENT_NO_DELEGATE=1`, and the run path refuses to spawn from any process carrying that
 flag. This is a hard "no further delegation" stop, independent of the depth counter: a
-reason-only agent (which should only reason, not act) cannot re-enter the bridge to spawn
-a child — including `codex_agent`'s read-only sandbox, which can still run read-only
-commands. Acting children (`allow_tools: true`) do not carry the flag and may delegate,
-bounded by the hop guard above.
+non-acting agent (which should only reason/read, not act) cannot re-enter the bridge to
+spawn a child — including `codex_agent`'s read-only sandbox, which can still run
+read-only commands. Acting children (`mode: "act"`) do not carry the flag and may
+delegate, bounded by the hop guard above.
 
 ## Build
 
@@ -321,7 +323,7 @@ it with `working_dir` and verify the diff afterward):
   "task": "Rename the symbol Foo to Bar across this package and update callers. Make the edits and list the files you changed.",
   "working_dir": "/path/to/project",
   "add_dirs": ["/path/to/project"],
-  "allow_tools": true
+  "mode": "act"
 }
 ```
 
@@ -341,7 +343,7 @@ Acting mode — let Claude edit files (unattended; scope it with `working_dir`):
   "working_dir": "/path/to/project",
   "add_dirs": ["/path/to/project"],
   "model": "sonnet",
-  "allow_tools": true
+  "mode": "act"
 }
 ```
 
@@ -361,6 +363,6 @@ scope it with `working_dir` and verify the diff afterward):
   "task": "Rename the symbol Foo to Bar across this package and update callers. Make the edits and list the files you changed.",
   "working_dir": "/path/to/project",
   "add_dirs": ["/path/to/project"],
-  "allow_tools": true
+  "mode": "act"
 }
 ```

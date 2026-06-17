@@ -17,20 +17,22 @@
 // in-code registry (see `backends`), so adding another CLI coding-agent is one
 // entry, not new code.
 //
-// Safety: tool-use (the child editing files / running commands) is DISABLED by
-// default. In the default mode the server runs the CLI with no permission-bypass,
-// so the child can reason/answer but cannot take unattended actions. To let the
-// spawned agent actually edit files in working_dir, the caller sets
-// `allow_tools: true`:
+// Access mode: the `mode` param selects the access tier — `reason` (default; no
+// tools, reason/answer only), `read` (read-only exploration), or `act` (full file
+// edits + command execution, unattended). Acting passes a permission-bypass flag:
 //   - gemini_agent passes --dangerously-skip-permissions to `agy`.
 //   - claude_agent passes --dangerously-skip-permissions to `claude`.
 //   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
 //
-// Scope it with `working_dir`. For gemini_agent the `--sandbox` flag is OFF by
-// default because it confines edits to an isolated scratch dir (set
+// Read mode: claude_agent passes --permission-mode plan; codex_agent reuses its
+// --sandbox read-only; gemini_agent has NO read tier. A legacy `allow_tools: true`
+// bool still works and is equivalent to `mode: "act"`.
+//
+// Scope read/act runs with `working_dir`. For gemini_agent the `--sandbox` flag is
+// OFF by default because it confines edits to an isolated scratch dir (set
 // `sandbox: true` only for a confined "compute but don't touch my files" run);
-// claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so
-// its default (`allow_tools: false`) runs it in a read-only sandbox
+// claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
+// default (`mode: "reason"`/`"read"`) runs it in a read-only sandbox
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
 //
@@ -41,8 +43,8 @@
 // Otherwise the child is spawned with AGENT_HOP_DEPTH incremented by one.
 //
 // Reason-only freeze: the hop guard bounds depth for AGENTS THAT ACT, but a
-// reason-only child should not delegate at all. So every reason-only child
-// (allow_tools=false) is spawned with AGENT_NO_DELEGATE=1 in its environment;
+// non-acting child should not delegate at all. So every non-acting child (mode
+// reason or read) is spawned with AGENT_NO_DELEGATE=1 in its environment;
 // any bridge server that child itself launches sees the flag and refuses to
 // spawn — a hard "no further delegation" stop that does not rely on the depth
 // counter. This matters most for codex_agent, whose reason-only mode is a
@@ -101,57 +103,75 @@ const (
 type runOpts struct {
 	task           string
 	timeoutSeconds int
-	allowTools     bool
-	sandbox        bool // gemini-only boolean --sandbox; ignored by claude/codex
-	model          string
-	effort         string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by gemini
-	addDirs        []string
-	workingDir     string
+	// Access tier. The public `mode` param maps to these two capability axes
+	// (allowTools implies the ability to write/run; readOnly is read-but-not-write):
+	//   reason → both false   read → readOnly   act → allowTools.
+	allowTools bool
+	readOnly   bool
+	sandbox    bool // gemini-only boolean --sandbox; ignored by claude/codex
+	model      string
+	effort     string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by gemini
+	addDirs    []string
+	workingDir string
 }
+
+// Access modes — the values of the `mode` param. reason = reason/answer only, no
+// tools (the default); read = read-only exploration (read/grep files, no edits or
+// effectful commands); act = full file edits + command execution (unattended).
+// Per backend: gemini_agent has no `read` tier; codex_agent's reason and read are
+// both its `--sandbox read-only` (it has no pure no-tools mode).
+const (
+	modeReason = "reason"
+	modeRead   = "read"
+	modeAct    = "act"
+)
 
 // Model-facing tool descriptions. The prose differs per backend; the parameter
 // set is shared (see commonToolOptions) so the tool schemas can't drift.
 const (
 	geminiToolDescription = "Spawn a Gemini agent (via the Antigravity `agy` CLI) to perform a task and return its " +
 		"response. Give it a self-contained task in `task`; it runs non-interactively and returns Gemini's full " +
-		"output. By default the spawned agent can reason and answer but CANNOT take unattended actions (no file " +
-		"edits / command execution) — set `allow_tools: true` to let it act, which disables Gemini's permission " +
-		"prompts and runs it UNATTENDED, with edits landing in `working_dir`. Sandboxing is OFF by default; set " +
+		"output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT take unattended " +
+		"actions (no file edits / command execution) — set `mode: \"act\"` to let it act, which disables Gemini's " +
+		"permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (gemini_agent has no `read` " +
+		"tier — only `reason` or `act`.) Sandboxing is OFF by default; set " +
 		"`sandbox: true` to instead confine edits to an isolated scratch dir. Use `add_dirs` for workspace context " +
 		"and `working_dir` to set where it runs."
 
 	claudeToolDescription = "Spawn a Claude agent (via the `claude` CLI) to perform a task and return its response. " +
 		"Give it a self-contained task in `task`; it runs non-interactively (`claude --print`) and returns Claude's " +
-		"full output. By default the spawned agent can reason and answer but CANNOT take unattended actions (no file " +
-		"edits / command execution) — set `allow_tools: true` to let it act, which passes --dangerously-skip-permissions " +
-		"so Claude auto-approves its own permission prompts and runs UNATTENDED (it will edit files / run commands and " +
-		"consume Claude credits without further confirmation). Use `add_dirs` for workspace context and `working_dir` " +
-		"to set where it runs. Set `effort` (low|medium|high|xhigh|max) to control reasoning effort. Note: even " +
-		"reason-only runs consume Claude credits."
+		"full output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT take " +
+		"unattended actions (no file edits / command execution). Set `mode: \"read\"` for read-only exploration " +
+		"(read/grep/glob the repo, no edits or commands — passes --permission-mode plan), or `mode: \"act\"` to let it " +
+		"act, which passes --dangerously-skip-permissions so Claude auto-approves its own permission prompts and runs " +
+		"UNATTENDED (it will edit files / run commands and consume Claude credits without further confirmation). Use " +
+		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
+		"(low|medium|high|xhigh|max) to control reasoning effort. Note: even reason-only runs consume Claude credits."
 
-	geminiAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
-		"only). Use with care — this is unattended execution; scope it with working_dir."
+	geminiModeDescription = "Access mode (default `reason`). `reason` = reason/answer only, no tools. `act` = edit " +
+		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). gemini_agent has NO " +
+		"read-only tier, so `read` is rejected — use `reason` or `act`. (Legacy: `allow_tools: true` ≡ `act`.)"
 
-	claudeAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
-		"only). Use with care — this is unattended execution that consumes Claude credits; scope it with working_dir."
+	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
+		"read-only exploration: read/grep/glob files, no edits or command execution (passes --permission-mode plan). " +
+		"`act` = full edit + command execution UNATTENDED (passes --dangerously-skip-permissions; consumes credits). " +
+		"Scope `read`/`act` with working_dir. (Legacy: `allow_tools: true` ≡ `act`.)"
 
 	codexToolDescription = "Spawn an OpenAI Codex agent (via the `codex` CLI, `codex exec`) to perform a task and return " +
 		"its response. Give it a self-contained task in `task`; it runs non-interactively and returns Codex's full " +
-		"output. By default (`allow_tools` false) the agent runs READ-ONLY (--sandbox read-only): it can read files " +
-		"and reason but CANNOT edit files or run effectful commands — note this is a read-only sandbox, not a pure " +
-		"no-tools mode. Set `allow_tools: true` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
+		"output. By default (`mode: \"reason\"` or `\"read\"` — both the same here) the agent runs READ-ONLY " +
+		"(--sandbox read-only): it can read files and reason but CANNOT edit files or run effectful commands — note " +
+		"this is a read-only sandbox, not a pure no-tools mode. Set `mode: \"act\"` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
 		"so it runs UNATTENDED with full file/command access and NO sandbox, with edits landing in `working_dir`. Use " +
 		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Set `effort` (e.g. " +
 		"low|medium|high) to control reasoning effort (passed as `-c model_reasoning_effort`). Codex runs even outside a " +
 		"Git repo (--skip-git-repo-check is always passed). The tool returns Codex's final message; its session banner " +
 		"and step-by-step transcript go to stderr and are surfaced only if the run fails or times out."
 
-	codexAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"passing --dangerously-bypass-approvals-and-sandbox, which skips ALL approvals AND disables Codex's sandbox. " +
-		"Default false (read-only sandbox: reads/reasons, no writes). Use with care — this is fully unattended, " +
-		"unsandboxed execution; scope it with working_dir."
+	codexModeDescription = "Access mode (default `reason`). `reason` and `read` are BOTH read-only (--sandbox " +
+		"read-only): read files + run read-only commands, no writes — codex has no pure no-tools mode. `act` = full, " +
+		"unsandboxed file/command access (passes --dangerously-bypass-approvals-and-sandbox). Use with care; scope it " +
+		"with working_dir. (Legacy: `allow_tools: true` ≡ `act`.)"
 
 	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
 		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
@@ -204,11 +224,17 @@ type backend struct {
 	// ["--skip-git-repo-check", "--color", "never"]). nil for CLIs that need none.
 	extraArgs []string
 
-	// reasonOnlyArgs are appended only when allow_tools is false — the restraint a
+	// reasonOnlyArgs are appended in the default `reason` mode — the restraint a
 	// CLI needs to stay read-only when it has no true no-tools mode (codex:
 	// ["--sandbox", "read-only"]). gemini/claude leave this nil: omitting the
 	// skip-perms flag already makes them reason-only.
 	reasonOnlyArgs []string
+
+	// readOnlyArgs are appended in `read` mode — the flags that grant read-only
+	// exploration (claude: ["--permission-mode", "plan"]; codex: ["--sandbox",
+	// "read-only"]). nil means the backend has no read-only tier (gemini), so `read`
+	// is rejected for it. supportsReadOnly() reports presence.
+	readOnlyArgs []string
 
 	// reasonOnlyNote overrides the result-header mode note for reason-only runs.
 	// "" yields the default "tool-use: disabled (reason/answer only)"; codex sets it
@@ -220,13 +246,17 @@ type backend struct {
 	// (gemini/agy); zero for claude/codex (the context deadline is the timeout).
 	timeoutHeadroom time.Duration
 
-	description    string // model-facing tool description
-	allowToolsDesc string // description for the allow_tools param
-	effortDesc     string // description for the effort param ("" if the backend has no effort lever)
+	description string // model-facing tool description
+	modeDesc    string // description for the `mode` param
+	effortDesc  string // description for the effort param ("" if the backend has no effort lever)
 }
 
 // supportsSandbox reports whether the backend exposes the sandbox option.
 func (b backend) supportsSandbox() bool { return b.sandboxFlag != "" }
+
+// supportsReadOnly reports whether the backend has a `read` (read-only) tier.
+// gemini has none (only no-tools or full), so `mode: "read"` is rejected for it.
+func (b backend) supportsReadOnly() bool { return len(b.readOnlyArgs) > 0 }
 
 // appliesEffort reports whether the backend exposes a reasoning-effort lever (a
 // dedicated flag or codex's config-key form). gemini has none — its effort lives in
@@ -294,9 +324,16 @@ func (b backend) buildArgs(o runOpts) []string {
 		args = append(args, b.sandboxFlag)
 	}
 	args = append(args, b.extraArgs...)
-	// reasonOnlyArgs keep a CLI without a true no-tools mode read-only when
-	// allow_tools is false (e.g. codex's --sandbox read-only).
-	if !o.allowTools {
+	// Restraint args for the non-acting tiers: `read` mode emits readOnlyArgs
+	// (claude --permission-mode plan / codex --sandbox read-only); the default
+	// `reason` mode emits reasonOnlyArgs (codex's read-only sandbox; gemini/claude
+	// none). The act tier emitted its skip-perms flag above and adds neither.
+	switch {
+	case o.allowTools:
+		// skip-perms flag already emitted; no restraint args.
+	case o.readOnly:
+		args = append(args, b.readOnlyArgs...)
+	default:
 		args = append(args, b.reasonOnlyArgs...)
 	}
 	// Positional prompt goes LAST, after subcmd and every flag, preceded by the "--"
@@ -315,17 +352,21 @@ func (b backend) buildArgs(o runOpts) []string {
 // reasonOnlyNote when set (codex is read-only, not no-tools), and the enabled note
 // names the backend's actual skip-perms / sandbox flags.
 func (b backend) modeNote(o runOpts) string {
-	if !o.allowTools {
+	switch {
+	case o.allowTools:
+		note := fmt.Sprintf("tool-use: ENABLED (%s)", b.skipPermsFlag)
+		if o.sandbox && b.supportsSandbox() {
+			note += " in " + b.sandboxFlag
+		}
+		return note
+	case o.readOnly:
+		return "tool-use: read-only (" + strings.Join(b.readOnlyArgs, " ") + ")"
+	default:
 		if b.reasonOnlyNote != "" {
 			return b.reasonOnlyNote
 		}
 		return "tool-use: disabled (reason/answer only)"
 	}
-	note := fmt.Sprintf("tool-use: ENABLED (%s)", b.skipPermsFlag)
-	if o.sandbox && b.supportsSandbox() {
-		note += " in " + b.sandboxFlag
-	}
-	return note
 }
 
 // selectionNote summarizes the model/effort actually requested, for the result
@@ -359,8 +400,9 @@ var backends = []backend{
 		skipPermsFlag:   "--dangerously-skip-permissions",
 		sandboxFlag:     "--sandbox",
 		timeoutHeadroom: geminiTimeoutHeadroom,
-		description:     geminiToolDescription,
-		allowToolsDesc:  geminiAllowToolsDescription,
+		// no readOnlyArgs — gemini has no read-only tier (only reason or act).
+		description: geminiToolDescription,
+		modeDesc:    geminiModeDescription,
 	},
 	{
 		tool:          "claude_agent",
@@ -371,10 +413,11 @@ var backends = []backend{
 		effortFlag:    "--effort",
 		addDirFlag:    "--add-dir",
 		skipPermsFlag: "--dangerously-skip-permissions",
+		readOnlyArgs:  []string{"--permission-mode", "plan"}, // claude's read-only tier (plan mode)
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
-		description:    claudeToolDescription,
-		allowToolsDesc: claudeAllowToolsDescription,
-		effortDesc:     claudeEffortDescription,
+		description: claudeToolDescription,
+		modeDesc:    claudeModeDescription,
+		effortDesc:  claudeEffortDescription,
 	},
 	{
 		tool:             "codex_agent",
@@ -388,14 +431,15 @@ var backends = []backend{
 		skipPermsFlag:    "--dangerously-bypass-approvals-and-sandbox",
 		extraArgs:        []string{"--skip-git-repo-check", "--color", "never"},
 		reasonOnlyArgs:   []string{"--sandbox", "read-only"},
+		readOnlyArgs:     []string{"--sandbox", "read-only"}, // codex's reason and read tiers are the same read-only sandbox
 		reasonOnlyNote:   "tool-use: read-only (--sandbox read-only)",
 		// promptFlag/timeoutFlag/sandboxFlag "" — codex takes the prompt positionally
 		// (`codex exec [flags] <prompt>`), has no internal print-timeout (timeoutHeadroom
 		// 0 — the ctx deadline IS the timeout), and exposes no boolean sandbox param
-		// (allow_tools toggles read-only sandbox vs. the bypass flag instead).
-		description:    codexToolDescription,
-		allowToolsDesc: codexAllowToolsDescription,
-		effortDesc:     codexEffortDescription,
+		// (mode toggles read-only sandbox vs. the bypass flag instead).
+		description: codexToolDescription,
+		modeDesc:    codexModeDescription,
+		effortDesc:  codexEffortDescription,
 	},
 }
 
@@ -457,12 +501,12 @@ func delegationDisabled(getenv func(string) string) bool {
 
 // childDelegationEnv returns a copy of env with any existing AGENT_NO_DELEGATE
 // entry REMOVED, then appends "AGENT_NO_DELEGATE=1" iff the spawned child is
-// reason-only (allow_tools=false). A reason-only child must not delegate
-// further, so the flag rides its environment to any bridge server the child
-// itself launches, where delegationDisabled() makes runAgent refuse. An acting
-// child (allow_tools=true) gets no flag and may still delegate, bounded by the
-// hop guard. Pure function — table-testable.
-func childDelegationEnv(env []string, reasonOnly bool) []string {
+// NON-ACTING (reason or read mode — i.e. !allowTools). A non-acting child must not
+// delegate further, so the flag rides its environment to any bridge server the
+// child itself launches, where delegationDisabled() makes runAgent refuse. An
+// acting child (mode act) gets no flag and may still delegate, bounded by the hop
+// guard. Pure function — table-testable.
+func childDelegationEnv(env []string, frozen bool) []string {
 	prefix := noDelegateEnv + "="
 	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
@@ -471,7 +515,7 @@ func childDelegationEnv(env []string, reasonOnly bool) []string {
 		}
 		out = append(out, kv)
 	}
-	if reasonOnly {
+	if frozen {
 		out = append(out, noDelegateEnv+"=1")
 	}
 	return out
@@ -494,11 +538,11 @@ func main() {
 	}
 }
 
-// commonToolOptions returns the tool options shared by both tools: the given
-// description plus the task/add_dirs/working_dir/timeout_seconds/model/allow_tools
-// params. Per-tool extras (e.g. gemini's sandbox) are appended by the caller.
-// Defining the shared params once keeps the two tool schemas from drifting.
-func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOption {
+// commonToolOptions returns the tool options shared by every tool: the given
+// description plus the task/add_dirs/working_dir/timeout_seconds/model/mode params.
+// Per-tool extras (e.g. gemini's sandbox, the effort param) are appended by the
+// caller. Defining the shared params once keeps the tool schemas from drifting.
+func commonToolOptions(description, modeDescription string) []mcp.ToolOption {
 	return []mcp.ToolOption{
 		mcp.WithDescription(description),
 		mcp.WithString("task",
@@ -523,8 +567,8 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 				"resolve to the latest; agy/codex take explicit names (list them with `agy models`). For reasoning effort "+
 				"see the `effort` param (claude_agent / codex_agent)."),
 		),
-		mcp.WithBoolean("allow_tools",
-			mcp.Description(allowToolsDescription),
+		mcp.WithString("mode",
+			mcp.Description(modeDescription),
 		),
 	}
 }
@@ -532,7 +576,7 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 // newTool builds the MCP tool for a backend: the shared params, plus the sandbox
 // option for backends that support it.
 func newTool(b backend) mcp.Tool {
-	opts := commonToolOptions(b.description, b.allowToolsDesc)
+	opts := commonToolOptions(b.description, b.modeDesc)
 	if b.appliesEffort() {
 		opts = append(opts, mcp.WithString("effort", mcp.Description(b.effortDesc)))
 	}
@@ -567,10 +611,38 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 		o := runOpts{
 			task:           task,
 			timeoutSeconds: timeoutSeconds,
-			allowTools:     req.GetBool("allow_tools", false),
 			model:          strings.TrimSpace(req.GetString("model", "")),
 			effort:         strings.TrimSpace(req.GetString("effort", "")),
 			workingDir:     req.GetString("working_dir", ""),
+		}
+
+		// Resolve the access tier. The `mode` enum (reason | read | act) is canonical;
+		// a legacy `allow_tools` bool is still honored when `mode` is omitted
+		// (allow_tools:true ≡ act). `read` is rejected for backends with no read-only
+		// tier (gemini).
+		mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "")))
+		if mode == "" {
+			if req.GetBool("allow_tools", false) {
+				mode = modeAct
+			} else {
+				mode = modeReason
+			}
+		}
+		switch mode {
+		case modeReason:
+			// defaults: allowTools=false, readOnly=false
+		case modeRead:
+			if !b.supportsReadOnly() {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"%s: no read-only mode — use mode \"reason\" (no tools) or \"act\" (full access). "+
+						"Only claude_agent and codex_agent have a read-only tier.", b.tool)), nil
+			}
+			o.readOnly = true
+		case modeAct:
+			o.allowTools = true
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode)), nil
 		}
 
 		// sandbox defaults OFF and is gemini-only. With --sandbox, agy confines
@@ -641,9 +713,9 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(o.workingDir) != "" {
 		cmd.Dir = o.workingDir
 	}
-	// Spawn the child with an incremented delegation depth (no duplicate keys),
-	// and — when this run is reason-only — with AGENT_NO_DELEGATE=1 so the child
-	// cannot re-enter the bridge to spawn a grandchild.
+	// Spawn the child with an incremented delegation depth (no duplicate keys), and
+	// — when this run is NON-ACTING (reason or read mode) — with AGENT_NO_DELEGATE=1
+	// so the child cannot re-enter the bridge to spawn a grandchild.
 	cmd.Env = childDelegationEnv(childHopEnv(os.Environ(), depth), !o.allowTools)
 
 	// Kill the whole process group on cancel/timeout (so grandchildren the child

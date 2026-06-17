@@ -171,6 +171,11 @@ func TestBuildClaudeArgs(t *testing.T) {
 			want: []string{"--print", "think hard", "--effort", "xhigh"},
 		},
 		{
+			name: "read mode appends --permission-mode plan (claude's read-only tier)",
+			in:   runOpts{task: "review", timeoutSeconds: 300, readOnly: true},
+			want: []string{"--print", "review", "--permission-mode", "plan"},
+		},
+		{
 			name: "model then effort then add-dir ordering",
 			in:   runOpts{task: "t", timeoutSeconds: 300, model: "opus", effort: "high", addDirs: []string{"/a"}},
 			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a"},
@@ -264,6 +269,11 @@ func TestBuildGeminiArgs(t *testing.T) {
 			want: []string{"--print", "x", "--print-timeout", "300s"},
 		},
 		{
+			name: "read mode is a no-op for gemini (no readOnlyArgs; handler rejects it earlier)",
+			in:   runOpts{task: "x", timeoutSeconds: 300, readOnly: true},
+			want: []string{"--print", "x", "--print-timeout", "300s"},
+		},
+		{
 			name: "all options combined, correct ordering",
 			in: runOpts{
 				task:           "full task",
@@ -330,6 +340,11 @@ func TestBuildCodexArgs(t *testing.T) {
 			name: "effort emits -c model_reasoning_effort among flags, before the -- prompt",
 			in:   runOpts{task: task, timeoutSeconds: 300, effort: "high"},
 			want: []string{"exec", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "read mode == reason for codex (both --sandbox read-only)",
+			in:   runOpts{task: task, timeoutSeconds: 300, readOnly: true},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
 		},
 		{
 			name: "model then effort both land before the trailing prompt",
@@ -762,6 +777,18 @@ func TestModeNotes(t *testing.T) {
 			want: "tool-use: read-only (--sandbox read-only)",
 		},
 		{
+			name: "claude read mode names plan mode",
+			b:    claudeBackend,
+			in:   runOpts{readOnly: true},
+			want: "tool-use: read-only (--permission-mode plan)",
+		},
+		{
+			name: "codex read mode is the same read-only sandbox",
+			b:    codexBackend,
+			in:   runOpts{readOnly: true},
+			want: "tool-use: read-only (--sandbox read-only)",
+		},
+		{
 			name: "codex allow_tools names the bypass flag, no --sandbox suffix",
 			b:    codexBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
@@ -1141,10 +1168,43 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("allow_tools adds skip-permissions", func(t *testing.T) {
+	t.Run("legacy allow_tools:true still maps to act (skip-permissions)", func(t *testing.T) {
 		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "allow_tools": true})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("allow_tools should pass the skip flag; args=%v", a)
+		}
+	})
+
+	t.Run("mode param: act / read / reason + rejections", func(t *testing.T) {
+		// act → skip-perms
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "mode": "act"})
+		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
+			t.Errorf("mode=act should pass the skip flag; args=%v", a)
+		}
+		// read (claude) → --permission-mode plan, no skip-perms
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "read"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "--permission-mode", "plan") || argsContain(a, "--dangerously-skip-permissions") {
+			t.Errorf("mode=read should pass --permission-mode plan and no skip flag; args=%v", a)
+		}
+		// reason → neither
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "reason"})
+		if a := handlerEchoArgs(t, res); argsContain(a, "--dangerously-skip-permissions") || argsContain(a, "plan") {
+			t.Errorf("mode=reason should be no-tools; args=%v", a)
+		}
+		// case-insensitive
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "ACT"})
+		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
+			t.Errorf("mode should be case-insensitive; args=%v", a)
+		}
+		// read on gemini → rejected (no read-only tier)
+		res, _ = call(t, geminiBackend, map[string]any{"task": "x", "mode": "read"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
+			t.Errorf("gemini mode=read should be rejected; got %q", resultText(t, res))
+		}
+		// invalid mode → rejected
+		res, _ = call(t, codexBackend, map[string]any{"task": "x", "mode": "bogus"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "invalid mode") {
+			t.Errorf("invalid mode should be rejected; got %q", resultText(t, res))
 		}
 	})
 
@@ -1282,7 +1342,7 @@ func TestToolSchemas(t *testing.T) {
 	}
 
 	// Shared params present on all three.
-	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
+	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "mode"} {
 		if _, ok := gemini.InputSchema.Properties[p]; !ok {
 			t.Errorf("gemini tool missing shared param %q", p)
 		}
@@ -1378,7 +1438,7 @@ func TestBackendRegistry(t *testing.T) {
 
 			// The tool must expose the shared params, and the sandbox param iff supported.
 			tool := newTool(b)
-			for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
+			for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "mode"} {
 				if _, ok := tool.InputSchema.Properties[p]; !ok {
 					t.Errorf("tool %q missing shared param %q", b.tool, p)
 				}
@@ -1395,6 +1455,20 @@ func TestBackendRegistry(t *testing.T) {
 				t.Errorf("backend %q applies effort but has empty effortDesc", b.tool)
 			}
 		})
+	}
+}
+
+func TestSupportsReadOnly(t *testing.T) {
+	// gemini has only no-tools or full; claude (plan mode) and codex (read-only
+	// sandbox) have a read tier. This locks the per-backend `read` capability.
+	if geminiBackend.supportsReadOnly() {
+		t.Error("gemini_agent must NOT advertise a read-only tier")
+	}
+	if !claudeBackend.supportsReadOnly() {
+		t.Error("claude_agent should have a read-only tier (--permission-mode plan)")
+	}
+	if !codexBackend.supportsReadOnly() {
+		t.Error("codex_agent should have a read-only tier (--sandbox read-only)")
 	}
 }
 

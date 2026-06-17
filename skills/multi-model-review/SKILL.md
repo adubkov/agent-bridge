@@ -141,8 +141,8 @@ named). Then **embed the diff text inline, verbatim** in each finder's
 finders flag phantom issues (e.g. a section that only *looks* missing because you
 trimmed it) and miss real ones. Embedding keeps the review self-contained and
 reproducible; what actually keeps each finder **reason-only — no file writes, no
-state-changing commands** is leaving `allow_tools` off (with `codex_agent` falling
-back to a `--sandbox read-only` mode). (Per-backend nuance: as spawned by the finder step —
+state-changing commands** is leaving `mode` at its default `reason` (with `codex_agent`
+falling back to a `--sandbox read-only` mode). (Per-backend nuance: as spawned by the finder step —
 reason-only, no `working_dir`/`add_dirs` — `gemini_agent` / `claude_agent` finders
 have nothing but the inline diff to go on: reason-only blocks unattended file edits
 and command execution, and nothing wires the repo in. `codex_agent` reason-only is a
@@ -160,11 +160,12 @@ bugs but is blind to anything outside the hunk; widen the context to fit the sta
 2. **Full changed *files*** — embed the entire files the diff touches when same-file
    callers/helpers matter, or to check *completeness* (e.g. a new struct field whose handling
    `switch` is unchanged, and therefore invisible in a hunk).
-3. **Repo-reading `codex_agent`** (`working_dir` set) — the only way to see *cross-file*
-   callers, type definitions, and guards. Most powerful, but it is an agentic read-only run
-   that can wander the tree and burn quota, so use it as a **targeted escalation** for a
-   *specific* finding that needs it (see "Diff-scoped reviewers" in step 3), not the default
-   pass.
+3. **Repo-reading reviewer** — a `codex_agent` (its default read-only sandbox) **or** a
+   `claude_agent` with `mode: "read"` (read-only plan mode), each with `working_dir` set —
+   the only way to see *cross-file* callers, type definitions, and guards. Most powerful, but
+   it is an agentic read-only run that can wander the tree (and, for codex, burn quota), so
+   use it as a **targeted escalation** for a *specific* finding that needs it (see
+   "Diff-scoped reviewers" in step 3), not the default pass.
 
 Two different blind spots, two different fixes. Missing **code** context — callers, guards,
 the rest of a function, type defs, completeness — is fixed by climbing this ladder. Missing
@@ -182,7 +183,7 @@ serializes tool calls still runs them all, just one after another.
 | Param | Value |
 |---|---|
 | `task` | The finder prompt + the embedded diff (see template). |
-| `allow_tools` | **omit it** (false) — keep finders reason-only (step 1 has the per-backend nuance). |
+| `mode` | **omit it** (default `reason`) — keep finders reason-only (step 1 has the per-backend nuance). |
 | `model` / `effort` | per **Model & effort selection** above (default `deep`; honor user overrides). |
 | `timeout_seconds` | 300–600 depending on diff size. |
 | `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
@@ -354,15 +355,13 @@ Antigravity host on `claude_agent` + `codex_agent`).
   file edits and command execution, and nothing wires the repo in. `codex_agent`
   reason-only is a `--sandbox read-only` mode, so it *can* already read the repo and
   run read-only commands; you still give it the diff inline for a uniform, scoped
-  input. If a finding genuinely needs wider context: with `codex_agent`, reason-only
-  already permits repo reads (point it at the repo with `working_dir`, else it reads
-  the bridge server's own directory); `gemini_agent` / `claude_agent` have **no read-only
-  sandbox tier** like codex's, so `allow_tools: true` is the only way to let them act
-  — it grants *full unattended execution* (`--dangerously-skip-permissions`: file
-  writes + arbitrary commands), so reach for it sparingly and scope it with
-  `working_dir`. For `gemini_agent` you can contain it further with `sandbox: true` —
-  edits land in an isolated scratch dir instead of `working_dir`; `claude_agent` has
-  no sandbox at all, so `working_dir` is its only scoping.
+  input. If a finding genuinely needs wider context: `codex_agent` (default read-only) and
+  `claude_agent` with `mode: "read"` (plan mode) both permit repo reads — point them at the
+  repo with `working_dir` (else they read the bridge server's own directory). `gemini_agent`
+  has **no read-only tier**, so `mode: "act"` is the only way to let it touch the repo — and
+  that grants *full unattended execution* (`--dangerously-skip-permissions`: file writes +
+  arbitrary commands), so reach for it sparingly, scope it with `working_dir`, and contain it
+  further with `sandbox: true` (edits land in an isolated scratch dir instead of `working_dir`).
 - **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep
   a review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
   `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and
@@ -373,7 +372,7 @@ Antigravity host on `claude_agent` + `codex_agent`).
   `codex_agent`'s read-only sandbox (which can still run read-only commands). A single
   review round, being all reason-only, therefore can't nest at all.
 - **Tool behavior is authoritative in the tool descriptions.** This skill summarizes what
-  each backend's reason-only / `allow_tools` / `working_dir` / `sandbox` modes do, but the
+  each backend's `mode` (reason/read/act) / `working_dir` / `sandbox` options do, but the
   bridge's own MCP tool descriptions (generated from `cmd/agent-bridge-mcp/main.go`) are
   the source of truth — if they ever diverge from this summary, trust them.
 - **Diversity is the point.** Prefer different families. If only one CLI is
