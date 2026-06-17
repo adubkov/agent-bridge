@@ -90,8 +90,9 @@ path the user named) and **embed the diff text inline, verbatim** in each finder
 `task` — do **not** summarize, paraphrase, or truncate it. A lossy diff makes
 finders flag phantom issues (e.g. a section that only *looks* missing because you
 trimmed it) and miss real ones. Embedding keeps the review self-contained and
-reproducible and keeps every finder to **reason-only — no file writes, no
-state-changing commands**. (Per-backend nuance: as spawned by the finder step —
+reproducible; what actually keeps each finder **reason-only — no file writes, no
+state-changing commands** is leaving `allow_tools` off (with `codex_agent` falling
+back to a `--sandbox read-only` mode). (Per-backend nuance: as spawned by the finder step —
 reason-only, no `working_dir`/`add_dirs` — `gemini_agent` / `claude_agent` finders
 have nothing but the inline diff to go on: reason-only blocks unattended file edits
 and command execution, and nothing wires the repo in. `codex_agent` reason-only is a
@@ -110,9 +111,9 @@ serializes tool calls still runs them all, just one after another.
 | Param | Value |
 |---|---|
 | `task` | The finder prompt + the embedded diff (see template). |
-| `allow_tools` | **omit it** (false) — finders only reason over the inline diff. |
+| `allow_tools` | **omit it** (false) — keep finders reason-only (step 1 has the per-backend nuance). |
 | `timeout_seconds` | 300–600 depending on diff size. |
-| `working_dir` / `add_dirs` | not needed (pure reasoning over inline text). |
+| `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
 
 Give every model the **same brief** so the diversity comes from the model, not the
 prompt. (You can layer distinct angles later; start uniform.)
@@ -152,8 +153,9 @@ that serializes tool calls the two waves still hold but wall-clock is the sum.
 > Answer with ONLY one JSON object:
 > `{"verdict": "CONFIRMED|PLAUSIBLE|REFUTED", "reason": "quote the line that proves it"}`.
 > CONFIRMED = you can name the trigger and wrong result. PLAUSIBLE = mechanism is
-> real but the trigger is uncertain. REFUTED = the code doesn't say that, or it's
-> guarded elsewhere (quote the guard).
+> real but the trigger is uncertain (use this too when a guard might exist outside
+> what you can see). REFUTED = what you can see visibly contradicts the finding, or
+> you can quote a guard that defuses it.
 > === FINDING ===
 > &lt;the candidate&gt;
 > === DIFF ===
@@ -191,15 +193,17 @@ Only if the user asked. You (the orchestrator) apply CONFIRMED findings directly
 then run the project's build/tests yourself. Do not delegate the fix unattended in
 the same pass — review-then-fix keeps a human-auditable step.
 
-## Fast mode (single parallel pass)
+## Fast mode (finders only, no cross-verify)
 
-For low-stakes diffs, skip cross-verification entirely: run the finder wave (step 2)
-in parallel, then dedup and synthesize directly. This is **one wave — the fastest
-possible run**, but you lose the adversarial cross-check (a finding only earns
-confidence by surviving a *different* model's refutation), so expect more false
-positives. Use it for a quick multi-model sanity sweep; use the full two-wave
-pipeline when correctness matters. **Say in the report that cross-verification was
-skipped.**
+Skip cross-verification entirely: run the finder wave (step 2) — in parallel if more
+than one model is connected — then dedup and synthesize directly. This is **one wave
+— the fastest possible run**, but you lose the adversarial cross-check (a finding
+only earns confidence by surviving a *different* model's refutation), so expect more
+false positives. Reach for it for a low-stakes multi-model sanity sweep, or as the
+unavoidable fallback when only one model is connected (nothing to cross-verify
+against); use the full two-wave pipeline when correctness matters. **Say in the
+report that cross-verification was skipped** — and, if only one model ran, that it
+was a single-model review.
 
 ## Output format
 
@@ -270,13 +274,15 @@ Antigravity host on `claude_agent` + `codex_agent`).
   `working_dir`. For `gemini_agent` you can contain it further with `sandbox: true` —
   edits land in an isolated scratch dir instead of `working_dir`; `claude_agent` has
   no sandbox at all, so `working_dir` is its only scoping.
-- **Delegation depth.** Fanning out spawns child agents; the bridge's hop guard
-  (`AGENT_HOP_MAX`) caps nesting *depth*. Reason-only finders are a separate
-  safeguard: `gemini_agent` / `claude_agent` reason-only cannot take unattended
-  actions (no file edits / command execution), and
-  `codex_agent` reason-only is a `--sandbox read-only` mode (reads and read-only
-  commands, no state-changing actions) — so none of them can perform the
-  state-changing spawn of a child agent, and a single review round stays shallow
-  regardless.
+- **Delegation depth.** Fanning out spawns child agents, so the structural cap on
+  nesting is the bridge's **hop guard**: it reads `AGENT_HOP_DEPTH`, refuses to spawn
+  once the depth reaches `AGENT_HOP_MAX` (default 2), and spawns each child with the
+  depth incremented — so a runaway A→B→A chain is bounded no matter what any reviewer
+  does. Reason-only mode is a *secondary, partial* safeguard, not a substitute:
+  `gemini_agent` / `claude_agent` reason-only have no tools at all, so they genuinely
+  cannot spawn a child; `codex_agent` reason-only is a `--sandbox read-only` mode that
+  still permits read-only command execution, so "it can't spawn a child" is not a
+  guarantee the sandbox gives you — the hop guard is what actually keeps a review
+  round shallow.
 - **Diversity is the point.** Prefer different families. If only one CLI is
   connected, this is a single-model review; report it as such.
