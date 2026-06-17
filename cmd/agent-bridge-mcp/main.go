@@ -18,7 +18,8 @@
 // entry, not new code.
 //
 // Access mode: the `mode` param selects the access tier — `reason` (default; no
-// permission-bypass, so no unattended writes/commands), `read` (read-only
+// permission-bypass — intended for reason/answer, but NOT a hard write-block for
+// every backend; see the agy caveat below), `read` (read-only
 // exploration), or `act` (full file edits + command execution, unattended). Acting
 // passes a permission-bypass flag:
 //   - antigravity_agent passes --dangerously-skip-permissions to `agy`.
@@ -36,15 +37,17 @@
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
 //
-// Reason tier — does it disable READS? Only for claude_agent. Omitting the
-// skip-perms flag stops unattended writes/commands but does NOT stop a CLI from
-// reading: both `claude --print` and `agy --print` auto-allow their read tools. So
-// claude_agent's `reason` additionally passes `--tools ""` to hard-disable ALL
-// built-in tools (a true no-tools run). agy has no tool-disabling flag, so
-// antigravity_agent's `reason` can still read; codex_agent's `reason` is the read-only
-// sandbox above. A reason child may therefore still read the filesystem unless it is
-// claude_agent — which is why the finder step also withholds `working_dir` so a
-// reading backend sees the server's cwd, not the repo under review.
+// Reason tier — what does it actually restrict? Omitting the skip-perms flag is
+// MEANT to stop unattended writes/commands, and does for claude_agent (which also
+// passes `--tools ""` to hard-disable ALL built-in tools — a true no-tools run) and
+// codex_agent (whose `reason` is a `--sandbox read-only` sandbox). But it does NOT
+// stop a CLI from reading: both `claude --print` and `agy --print` auto-allow read
+// tools. And it does NOT stop agy from WRITING: agy has no tool-disabling flag and
+// does not gate writes behind skip-perms, so a `reason` antigravity_agent pointed at
+// a writable `working_dir` can still edit files unattended — pass `sandbox: true` (or
+// withhold `working_dir`) to confine it. This is why the finder step withholds
+// `working_dir` (a reading backend then sees the server's cwd, not the repo) and why
+// a repo-reading agy review must add `sandbox: true`.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
@@ -142,11 +145,12 @@ const (
 const (
 	antigravityToolDescription = "Spawn an Antigravity agent (Google's `agy` CLI, which runs Gemini models) to perform a " +
 		"task and return its response. Give it a self-contained task in `task`; it runs non-interactively and returns " +
-		"the agent's full output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT " +
-		"take unattended actions (no file edits / command execution) — set `mode: \"act\"` to let it act, which disables " +
-		"agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent has no " +
-		"`read` tier — only `reason` or `act`.) Sandboxing is OFF by default; set " +
-		"`sandbox: true` to instead confine edits to an isolated scratch dir. Use `add_dirs` for workspace context " +
+		"the agent's full output. By default (`mode: \"reason\"`) it runs WITHOUT the permission-bypass flag and is meant " +
+		"to reason/answer — but agy has no tool-disable flag and does NOT gate writes, so a `reason` agent pointed at a " +
+		"writable `working_dir` can still read AND edit files unattended; pass `sandbox: true` to confine any edits to an " +
+		"isolated scratch dir (or omit `working_dir`) to keep it off your files. Set `mode: \"act\"` to let it act, which " +
+		"disables agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent " +
+		"has no `read` tier — only `reason` or `act`.) Sandboxing is OFF by default. Use `add_dirs` for workspace context " +
 		"and `working_dir` to set where it runs."
 
 	claudeToolDescription = "Spawn a Claude agent (via the `claude` CLI) to perform a task and return its response. " +
@@ -159,10 +163,11 @@ const (
 		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
 		"(low|medium|high|xhigh|max) to control reasoning effort. Note: even reason-only runs consume Claude credits."
 
-	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass, so no unattended file " +
-		"edits / commands — but agy has no tool-disabling flag, so the agent may still use read tools. `act` = edit " +
-		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO " +
-		"read-only tier, so `read` is rejected — use `reason` or `act`."
+	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass flag — but agy has no " +
+		"tool-disabling flag and does NOT gate writes, so a `reason` agent with a writable working_dir may still read AND " +
+		"edit files unattended; pass `sandbox: true` to confine writes. `act` = edit files in working_dir + run commands " +
+		"UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO read-only tier, so `read` is " +
+		"rejected — use `reason` or `act`."
 
 	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
 		"read-only exploration: read/grep/glob files, no edits or command execution (passes --permission-mode plan). " +
@@ -417,8 +422,9 @@ var backends = []backend{
 		sandboxFlag:     "--sandbox",
 		timeoutHeadroom: antigravityTimeoutHeadroom,
 		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
-		// has no tool-disabling flag, so reason omits the bypass flag (no unattended
-		// writes) but its read tools stay available; reasonOnlyNote says so honestly.
+		// has no tool-disabling flag and does not gate writes behind the bypass flag, so a
+		// reason agent with a writable working_dir can still read AND edit unattended (use
+		// sandbox to confine); reasonOnlyNote states the no-bypass tier honestly.
 		reasonOnlyNote: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
 		description:    antigravityToolDescription,
 		modeDesc:       antigravityModeDescription,
