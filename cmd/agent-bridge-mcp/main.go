@@ -157,7 +157,8 @@ const (
 		"Give it a self-contained task in `task`; it runs non-interactively (`claude --print`) and returns Claude's " +
 		"full output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT take " +
 		"unattended actions (no file edits / command execution). Set `mode: \"read\"` for read-only exploration " +
-		"(read/grep/glob the repo, no edits or commands — passes --permission-mode plan), or `mode: \"act\"` to let it " +
+		"(read/grep/glob the repo and run read-only commands like `git diff`, but no edits or effectful commands — " +
+		"passes --permission-mode plan), or `mode: \"act\"` to let it " +
 		"act, which passes --dangerously-skip-permissions so Claude auto-approves its own permission prompts and runs " +
 		"UNATTENDED (it will edit files / run commands and consume Claude credits without further confirmation). Use " +
 		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
@@ -170,7 +171,8 @@ const (
 		"rejected — use `reason` or `act`."
 
 	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
-		"read-only exploration: read/grep/glob files, no edits or command execution (passes --permission-mode plan). " +
+		"read-only exploration: read/grep/glob files and run read-only commands like `git diff`, but no edits or " +
+		"effectful commands (passes --permission-mode plan). " +
 		"`act` = full edit + command execution UNATTENDED (passes --dangerously-skip-permissions; consumes credits). " +
 		"Scope `read`/`act` with working_dir."
 

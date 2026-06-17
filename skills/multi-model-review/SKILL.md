@@ -183,9 +183,12 @@ big, drop *whole files*, do not compress). Reach for this only when the change i
 repo the reviewers can access (a pasted patch, a PR not fetched locally), or you need
 strictly byte-identical input across finders. In inline mode keep finders reason-only
 (omit `mode`) with no `working_dir`, and tell them to reason only over the inline diff.
-(Per-backend reason-only read nuance there: `claude_agent` passes `--tools ""` → genuinely
-no tools; `codex_agent` is a read-only sandbox; `antigravity_agent` can still read but sees
-only the bridge's cwd because no `working_dir` is wired in.)
+(Per-backend reason-only nuance there: `claude_agent` passes `--tools ""` → genuinely no
+tools; `codex_agent` is a read-only sandbox; `antigravity_agent` is the exception — it has
+no tool-disable flag and, with no `working_dir`, runs in the **bridge server's own cwd**,
+which can itself be a writable tree (the host launches the server in your project), so an
+inline agy finder can still edit files unattended. Give agy `sandbox: true` even in inline
+mode to confine any write to a throwaway scratch dir.)
 
 ### 2. Fan out finders (read-only, in parallel)
 
@@ -196,7 +199,7 @@ fans them out in parallel; a host that serializes still runs them all, one after
 | Param | Repo-reading (default) | Inline (fallback) |
 |---|---|---|
 | `task` | finder prompt + the exact diff command + the "inspect only" enforcing line | finder prompt + the verbatim embedded diff |
-| `mode` / `sandbox` | per the read-only recipe (claude/codex `read`; agy `reason` **+ `sandbox: true`**) | omit `mode` (reason-only); no sandbox |
+| `mode` / `sandbox` | per the read-only recipe (claude/codex `read`; agy `reason` **+ `sandbox: true`**) | omit `mode` (reason-only); **agy still needs `sandbox: true`** (its cwd may be writable — see caveat) |
 | `working_dir` | the repo root (absolute path) | leave unset |
 | `model` / `effort` | per **Model & effort selection** above (default `deep`; honor overrides) | same |
 | `timeout_seconds` | 300–600 (repo-reading is agentic — lean higher for big repos) | 300–600 |
@@ -376,8 +379,10 @@ Antigravity host on `claude_agent` + `codex_agent`).
   permission-bypass flag — but agy still performs **unattended file writes** non-
   interactively when pointed at a writable `working_dir` (verified: it created a file). So a
   repo-reading agy reviewer **must** add `sandbox: true`; the sandbox (not the absence of the
-  bypass flag) is what protects your tree. In *inline* mode agy stays safe only because no
-  `working_dir` is wired in, so it sees the bridge's cwd rather than your repo.
+  bypass flag) is what protects your tree. In *inline* mode no `working_dir` is wired in, so
+  agy runs in the bridge server's own cwd — but that cwd can itself be a writable tree (the
+  host typically launches the server in your project dir), so inline agy is **not** inherently
+  safe either; give it `sandbox: true` in inline mode too for a hard guarantee.
 - **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep a
   review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
   `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and

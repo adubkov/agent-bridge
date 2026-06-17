@@ -48,14 +48,16 @@ review/verification of whatever Antigravity produces (always verify its output).
 | `add_dirs` | Extra workspace dirs for context. |
 | `model` | Optional; the CLI default is fine. Pass a name for a specific model (`agy models` lists Gemini's). |
 | `timeout_seconds` | Default 300, max 1800. Raise for big tasks. |
-| `mode` | **`reason`** by default (reason/answer only). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). `antigravity_agent` has no `read` tier. |
+| `mode` | **`reason`** by default — reason/answer, but **not** a hard write-block: agy has no tool-disable flag and doesn't gate writes, so a `reason` agent with a writable `working_dir` can still edit files unattended (pass `sandbox: true`, or omit `working_dir`, to prevent that). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). `antigravity_agent` has no `read` tier. |
 | `sandbox` | **false by default.** When true, agy confines the agent to an isolated scratch dir, so its edits do NOT reach `working_dir` — only for a "compute but don't touch my files" run. Leave it off for real edits. |
 
 ### Two modes (antigravity)
 
-1. **Reason/answer (default, `mode: "reason"`)** — safe. Antigravity analyzes
-   and returns text; it cannot touch the filesystem unattended. Use for
-   analysis, drafts-as-text, second opinions.
+1. **Reason/answer (default, `mode: "reason"`)** — for analysis, drafts-as-text,
+   second opinions. ⚠️ Not a hard write-block: agy has no tool-disable flag and
+   doesn't gate writes, so a `reason` agent pointed at a writable `working_dir` can
+   still edit files unattended. For a truly hands-off run, pass `sandbox: true` (edits
+   go to a throwaway scratch dir) or omit `working_dir`.
 2. **Acting (`mode: "act"`, `sandbox` left off)** — Antigravity edits files /
    runs commands in `working_dir` with its permission gates off. Use for the
    mechanical-edit cases. **Always pass `working_dir` so it's scoped, leave

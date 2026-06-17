@@ -55,7 +55,7 @@ It mirrors `antigravity_agent`'s semantics. **Note:** every run shells out to th
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
-| `mode` | string | `reason` | Access tier: `reason` (no tools — hard-locked via `--tools ""`, so genuinely read-incapable) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
+| `mode` | string | `reason` | Access tier: `reason` (no tools — hard-locked via `--tools ""`, so genuinely read-incapable) · `read` (read-only exploration — read/grep files + read-only commands like `git diff`, no edits or effectful commands, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Antigravity-only and
 `--sandbox` is never passed to `claude`.
@@ -94,11 +94,13 @@ reason/answer only, and `codex_agent` `reason` is a read-only sandbox (below).
 gate writes behind the bypass flag, so a `reason` agent pointed at a writable `working_dir`
 can still read (agy auto-allows reads) **and** edit files unattended; pass `sandbox: true`
 (or omit `working_dir`) to keep it off your files. `claude_agent` also offers `mode: "read"`
-— read-only exploration (read/grep files via `--permission-mode plan`, no edits or commands). To
-let an agent actually act on your files/system, set `mode: "act"`, which passes
-`--dangerously-skip-permissions` to the underlying CLI (the child's approval gates are
-off — this is unattended execution). Scope it with `working_dir`; the agent's edits
-land there.
+— read-only exploration (read/grep files plus read-only commands like `git diff` via
+`--permission-mode plan`, but no edits or effectful commands). To let an agent actually act
+on your files/system, set `mode: "act"`, which passes a permission-bypass flag to the
+underlying CLI — `--dangerously-skip-permissions` for `claude`/`agy`,
+`--dangerously-bypass-approvals-and-sandbox` for `codex` (see the per-tool note below) —
+turning the child's approval gates off (unattended execution). Scope it with `working_dir`;
+the agent's edits land there.
 
 For `antigravity_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
 the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.
