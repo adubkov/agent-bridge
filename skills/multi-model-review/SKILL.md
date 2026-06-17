@@ -18,8 +18,9 @@ your own host's model family. (For fast, deep, *same*-model review, a host's
 native reviewer — e.g. Claude Code's `/code-review` — is the cheaper choice.)
 
 **You are the orchestrator, not a reviewer** — whichever agent is running this
-skill (a Claude Code, Antigravity/Gemini, or Codex session). You gather the diff,
-call the bridge tools, run the verification round, and synthesize. The reviewers
+skill (a Claude Code, Antigravity/Gemini, or Codex session). You set up the change
+(point reviewers at the repo, or gather the diff), call the bridge tools, run the
+verification round, and synthesize. The reviewers
 are the *spawned* bridge agents; **you do not add your own findings on a diff you
 authored** — that reintroduces the very author bias this skill exists to avoid (see
 "Independence" below). This pipeline is the same regardless of which host you run
@@ -125,99 +126,110 @@ even when you disagree with them.
 
 ## Pipeline
 
-1. **Gather the diff** — yourself, inline.
-2. **Fan out finders** — one reason-only call per reviewer model, diff embedded.
+1. **Set up the change** — decide how reviewers see it: point them at the repo
+   (default) or embed the diff inline (fallback).
+2. **Fan out finders** — one read-only call per reviewer model; each pulls the diff itself.
 3. **Cross-verify** — each candidate checked by a *different* model.
 4. **Synthesize** — dedup, rank, report with provenance.
 5. **(optional) Fix** — only if asked.
 
-### 1. Gather the diff
+### 1. How reviewers see the change
 
-Run it yourself — and gather it with **`git diff --function-context`** (`-W`) so each hunk
-carries its *whole enclosing function*, not just the default ±3 lines (e.g. `git diff
---function-context @{upstream}...HEAD`, `git diff -W main...HEAD`, or a PR/path the user
-named). Then **embed the diff text inline, verbatim** in each finder's
-`task` — do **not** summarize, paraphrase, or truncate it. A lossy diff makes
-finders flag phantom issues (e.g. a section that only *looks* missing because you
-trimmed it) and miss real ones. Embedding keeps the review self-contained and
-reproducible; what actually keeps each finder **reason-only — no file writes, no
-state-changing commands** is leaving `mode` at its default `reason` (with `codex_agent`
-falling back to a `--sandbox read-only` mode). (Per-backend nuance on *reads*, as spawned
-by the finder step — reason-only, no `working_dir`/`add_dirs`: `claude_agent` reason-only
-hard-disables all tools (`--tools ""`), so it genuinely has nothing but the inline diff.
-`antigravity_agent` reason-only blocks unattended writes/commands but agy still allows read
-tools — so what keeps it to the diff is that nothing wires the repo in: with no
-`working_dir` it sees the bridge's own cwd, not the repo. `codex_agent` reason-only is a
-`--sandbox read-only` mode that technically *could* read the repo, but you still
-hand it the diff inline so all finders judge the same scoped input.) If the diff is
-very large, narrow scope by dropping *whole files* — never by compressing the diff
-text.
+Two modes. **Default: point each reviewer at the repo and let it pull the diff itself.**
+This removes the orchestrator as a lossy middleman — the failure mode where you
+summarize or truncate a big diff into the `task` and finders flag phantoms or miss real
+bugs — and it lets each reviewer read *around* the change (call sites, type defs, guards)
+the way an inline hunk never can. **Fallback: embed the diff inline** ("Inline mode"
+below) when the change isn't in a repo the reviewers can reach, or you want byte-identical
+input across finders.
 
-**How much context to embed — the ladder.** A bare `git diff` (±3 lines) catches *local*
-bugs but is blind to anything outside the hunk; widen the context to fit the stakes:
+**Repo-reading, read-only (the default).** Give every reviewer:
 
-1. **`git diff --function-context` (the default above)** — whole changed functions, no repo
-   access needed. Kills most "I can't see the rest of the function" misses at near-zero cost.
-   Start here.
-2. **Full changed *files*** — embed the entire files the diff touches when same-file
-   callers/helpers matter, or to check *completeness* (e.g. a new struct field whose handling
-   `switch` is unchanged, and therefore invisible in a hunk).
-3. **Repo-reading reviewer** — a `codex_agent` (its default read-only sandbox) **or** a
-   `claude_agent` with `mode: "read"` (read-only plan mode), each with `working_dir` set —
-   the only way to see *cross-file* callers, type definitions, and guards. Most powerful, but
-   it is an agentic read-only run that can wander the tree (and, for codex, burn quota), so
-   use it as a **targeted escalation** for a *specific* finding that needs it (see
-   "Diff-scoped reviewers" in step 3), not the default pass.
+- `working_dir` = the repo root (absolute path). Without it the spawned agent runs in the
+  *bridge server's* own cwd, not your repo, and sees nothing.
+- the **exact** diff command in the `task`, so every reviewer judges the *same* change —
+  e.g. `git diff --function-context <base>...<head>` (a PR ref, `@{upstream}...HEAD`, or
+  paths the user named). Tell it to run that, review those changes, and read surrounding
+  files only as needed.
+- the per-backend **read-only recipe** below. Each is verified to read the repo, run
+  read-only `git`, stay write-safe, and keep the no-delegate freeze:
 
-Two different blind spots, two different fixes. Missing **code** context — callers, guards,
-the rest of a function, type defs, completeness — is fixed by climbing this ladder. Missing
-**external/runtime** knowledge — how a CLI, library, or framework actually behaves — is *not*
-fixed by any amount of context; only a reviewer that already has that knowledge catches it,
-which is why cross-family **model diversity** matters as much as context depth.
+  | Backend | Read-only recipe | Why |
+  |---|---|---|
+  | `claude_agent` | `mode: "read"` | `--permission-mode plan`: read/grep/glob + read-only Bash (incl. `git diff`); no edits or commands. |
+  | `codex_agent` | `mode: "read"` | `--sandbox read-only`: reads + read-only commands; no writes. |
+  | `antigravity_agent` | `mode: "reason"` **+ `sandbox: true`** | agy has no read tier, and its `reason` mode **does not block writes** — it will edit files unattended if pointed at a writable `working_dir`. `sandbox: true` confines any write to a throwaway scratch dir while reads of `working_dir` and read-only `git` still work, and `reason` keeps the delegation freeze. (Do **not** use `mode: "act"`+`sandbox`: also write-safe, but `act` forfeits the freeze — see Delegation.) |
 
-### 2. Fan out finders (reason-only, in parallel)
+  Always add an **enforcing line** to the `task`: *"Inspect only — do not edit, create, or
+  delete files, do not run state-changing commands, and do not delegate to other agents."*
+  For agy the sandbox is the real guarantee and the line is defense-in-depth; for
+  claude/codex the mode already enforces it.
 
-For each reviewer model, call its tool with the finder prompt below, the diff
-embedded. **Issue them in a single message** — a host that runs independent tool
-calls concurrently (e.g. Claude Code) then fans them out in parallel; a host that
-serializes tool calls still runs them all, just one after another.
+First make sure the repo is in the state you want reviewed — the PR branch checked out and
+the base ref present locally — since each reviewer reads the live working tree.
 
-| Param | Value |
-|---|---|
-| `task` | The finder prompt + the embedded diff (see template). |
-| `mode` | **omit it** (default `reason`) — keep finders reason-only (step 1 has the per-backend nuance). |
-| `model` / `effort` | per **Model & effort selection** above (default `deep`; honor user overrides). |
-| `timeout_seconds` | 300–600 depending on diff size. |
-| `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
+**Context is now (almost) free.** Because reviewers read the repo, the old "how much diff
+to embed" ladder mostly dissolves: each can pull `--function-context`, open whole files,
+and chase cross-file callers / guards / type-defs itself. Missing **code** context stops
+being the orchestrator's problem. What model diversity *still* uniquely buys is
+**external/runtime** knowledge — how a CLI, library, or framework actually behaves — which
+no amount of context substitutes for; that is why cross-family reviewers matter as much as
+ever.
 
-> **Keep `codex_agent` scoped.** Its reason-only mode is an *agentic* `--sandbox read-only`
-> run, not a no-tools mode. (Of the diff-only backends, only `claude_agent` reason-only is
-> truly no-tools — it passes `--tools ""` and genuinely cannot read; `antigravity_agent`
-> reason-only can *also* read, because agy has no tool-disable flag, and is kept to the diff
-> only by withholding `working_dir`.) For codex: if you set `working_dir`/`add_dirs` or tell
-> it to "consult the repo," it will read files and can wander a large tree — slow, and it can
-> burn its usage quota mid-review.
-> For the finder/verifier passes leave `working_dir` unset and keep the "reason only over the
-> inline diff" line in the prompt. Route to a repo-reading `codex_agent` (with `working_dir`
-> set) only for a *specific* finding that genuinely needs out-of-diff context — see
-> "Diff-scoped reviewers" below.
+**Inline mode (fallback).** Gather the diff yourself with `git diff --function-context`
+(`-W`) and **embed it verbatim** in each finder's `task` — never summarize, paraphrase, or
+truncate (a lossy diff makes finders flag phantom issues and miss real ones; if it is too
+big, drop *whole files*, do not compress). Reach for this only when the change isn't in a
+repo the reviewers can access (a pasted patch, a PR not fetched locally), or you need
+strictly byte-identical input across finders. In inline mode keep finders reason-only
+(omit `mode`) with no `working_dir`, and tell them to reason only over the inline diff.
+(Per-backend reason-only read nuance there: `claude_agent` passes `--tools ""` → genuinely
+no tools; `codex_agent` is a read-only sandbox; `antigravity_agent` can still read but sees
+only the bridge's cwd because no `working_dir` is wired in.)
 
-Give every model the **same brief** so the diversity comes from the model, not the
-prompt. (You can layer distinct angles later; start uniform.)
+### 2. Fan out finders (read-only, in parallel)
 
-**Finder prompt template:**
+For each reviewer model, call its tool with the finder prompt below. **Issue them in a
+single message** — a host that runs independent tool calls concurrently (e.g. Claude Code)
+fans them out in parallel; a host that serializes still runs them all, one after another.
 
-> You are an independent senior reviewer. Review the unified diff below for
-> CORRECTNESS bugs (logic errors, wrong conditions, off-by-one, nil/undefined,
-> missing error handling, concurrency hazards, broken call sites). Be specific:
-> name the trigger and the wrong result. Do not nitpick style.
-> **Reason only over the inline diff — do NOT read files, list directories, or run
-> commands; everything you need is below.**
+| Param | Repo-reading (default) | Inline (fallback) |
+|---|---|---|
+| `task` | finder prompt + the exact diff command + the "inspect only" enforcing line | finder prompt + the verbatim embedded diff |
+| `mode` / `sandbox` | per the read-only recipe (claude/codex `read`; agy `reason` **+ `sandbox: true`**) | omit `mode` (reason-only); no sandbox |
+| `working_dir` | the repo root (absolute path) | leave unset |
+| `model` / `effort` | per **Model & effort selection** above (default `deep`; honor overrides) | same |
+| `timeout_seconds` | 300–600 (repo-reading is agentic — lean higher for big repos) | 300–600 |
+
+> **Scope each reviewer tightly.** A repo-reading reviewer is agentic and can wander the
+> tree (and, for codex, burn usage quota) if you let it. In the `task`: name the exact diff
+> command and the files in scope, tell it to review *only* that change (reading around it as
+> needed) and not to explore unrelated parts of the repo, and keep the enforcing "inspect
+> only — no edits, state-changing commands, or delegation" line in every prompt. (That line
+> is load-bearing for agy, whose sandbox confines writes but whose model is otherwise free
+> to roam; for claude/codex the read mode already blocks writes.)
+
+Give every model the **same brief** so the diversity comes from the model, not the prompt.
+(You can layer distinct angles later; start uniform.)
+
+**Finder prompt template (repo-reading default):**
+
+> You are an independent senior reviewer with `working_dir` set to a git repo. Run
+> `git diff --function-context <base>...<head>` to see the change under review, then review
+> it for CORRECTNESS bugs (logic errors, wrong conditions, off-by-one, nil/undefined,
+> missing error handling, concurrency hazards, broken call sites). You MAY read the
+> surrounding files, callers, and type definitions for context, but **review only that
+> diff's changes**. **Inspect only — do NOT edit/create/delete files, run state-changing
+> commands, or delegate to other agents.** Be specific: name the trigger and the wrong
+> result. Do not nitpick style.
 > Return **ONLY** a JSON array (max 8) of objects:
 > `{"file": "...", "line": "...", "severity": "HIGH|MEDIUM|LOW", "summary": "...", "why": "concrete inputs/state → wrong result"}`.
 > No prose outside the JSON. If you find nothing, return `[]`.
-> === DIFF ===
-> &lt;embed the unified diff here&gt;
+
+For **inline mode**, replace the first two sentences with: *"Review the unified diff below
+for CORRECTNESS bugs … Reason only over the inline diff — do NOT read files, list
+directories, or run commands; everything you need is below,"* then append `=== DIFF ===`
+and the verbatim diff.
 
 Tag each returned finding with the **finder model** that produced it.
 
@@ -227,8 +239,8 @@ Pool all candidates and assign each a **verifier model ≠ the finder model**
 (round-robin across the participating models: e.g. gemini→claude, claude→codex,
 codex→gemini; with two models, just use the other; with only one model connected you
 cannot cross-verify at all — use Fast mode and report it as a single-model review).
-Then **dispatch every verifier call in a single message**, each reason-only with the
-diff embedded — just like the finder wave.
+Then **dispatch every verifier call in a single message**, using the same read-only
+repo-reading recipe as the finders (or inline, matching whatever the finders used).
 
 This is a **two-wave** pipeline: all finders, then all verifiers. The one
 unavoidable wait is *between* the waves — a finding can't be verified before it
@@ -236,36 +248,34 @@ exists. On a host that dispatches tool calls concurrently (e.g. Claude Code) eac
 wave runs in parallel, so total time ≈ slowest finder + slowest verifier; on a host
 that serializes tool calls the two waves still hold but wall-clock is the sum.
 
-**Verifier prompt template:**
+**Verifier prompt template (repo-reading default):**
 
-> Another reviewer flagged this finding in the diff below. Decide if it is real.
-> **Reason only over the inline diff — do NOT read files or run commands.**
-> Answer with ONLY one JSON object:
-> `{"verdict": "CONFIRMED|PLAUSIBLE|REFUTED", "reason": "quote the line that proves it"}`.
-> CONFIRMED = you can name the trigger and wrong result. PLAUSIBLE = mechanism is
-> real but the trigger is uncertain (use this too when a guard might exist outside
-> what you can see). REFUTED = what you can see visibly contradicts the finding, or
-> you can quote a guard that defuses it.
+> Another reviewer flagged the finding below. With `working_dir` set to a git repo, run
+> `git diff --function-context <base>...<head>` — and read call sites, guards, and type
+> defs as needed — to decide if it is real. **Inspect only — no edits, state-changing
+> commands, or delegation.** Answer with ONLY one JSON object:
+> `{"verdict": "CONFIRMED|PLAUSIBLE|REFUTED", "reason": "quote the line or guard that proves it"}`.
+> CONFIRMED = you can name the trigger and wrong result. PLAUSIBLE = mechanism is real but
+> the trigger is uncertain. REFUTED = the code visibly contradicts the finding, or you can
+> quote a guard that defuses it.
 > === FINDING ===
 > &lt;the candidate&gt;
-> === DIFF ===
-> &lt;embed the unified diff here&gt;
 
-Keep **CONFIRMED** and **PLAUSIBLE**; drop **REFUTED**. (Prototype: one cross-vote
-per finding. For higher confidence, send to BOTH other models and require a
-majority — note the extra cost.)
+For **inline mode**, swap the run-`git` sentence for *"Decide if it is real, reasoning only
+over the inline diff — do NOT read files or run commands,"* and append `=== DIFF ===` plus
+the verbatim diff.
 
-**Diff-scoped reviewers.** `antigravity_agent` / `claude_agent` finders and verifiers see
-only the inline diff, so they can't check call sites or guards that live outside it.
-Read the templates' "broken call sites" and "guarded elsewhere (quote the guard)" as
-scoped to what the diff shows: a diff-only verifier that can't find a guard should
-answer **PLAUSIBLE**, not REFUTED — a guard it can't see is not proof there is none.
-When out-of-diff context is essential to a verdict, route that finding to a
-repo-reading reviewer — `codex_agent` in reason-only (`--sandbox read-only`) mode can
-read the repo, but **only if you point it there**: set `working_dir` to the repo root
-(and `add_dirs` for any extra trees). Left unset, the spawned `codex` inherits the
-bridge server's own working directory — not the repo under review — so it may not see
-the files at all.
+Keep **CONFIRMED** and **PLAUSIBLE**; drop **REFUTED**. (Prototype: one cross-vote per
+finding. For higher confidence, send to BOTH other models and require a majority — note the
+extra cost.)
+
+**Out-of-diff context.** A repo-reading verifier can chase call sites, guards, and type
+defs across files, so a **REFUTED** backed by a quoted guard is now trustworthy — this is a
+real advantage of the repo-reading default over inline. In **inline mode** a reviewer sees
+only the diff and cannot prove a guard's *absence*: there, a verifier that can't find a
+guard should answer **PLAUSIBLE**, not REFUTED. If an inline verdict hinges on out-of-diff
+context, re-run that one finding in repo-reading mode (the recipe in step 1, `working_dir`
+set) rather than trusting a blind REFUTED.
 
 ### 4. Synthesize
 
@@ -354,30 +364,31 @@ Antigravity host on `claude_agent` + `codex_agent`).
 - **JSON robustness.** Models sometimes wrap JSON in prose or ``` fences. Instruct
   "ONLY JSON" (the templates do) and parse defensively — extract the largest JSON
   array/object from the reply rather than assuming the whole reply is JSON.
-- **Inline-only context, and what it takes to widen it.** As spawned by the finder
-  step (reason-only, no `working_dir`/`add_dirs`), the finders have only the embedded
-  diff to reason over — reason-only blocks unattended file edits and command
-  execution. `claude_agent` reason-only additionally passes `--tools ""`, so it has no
-  tools at all and genuinely cannot read; `antigravity_agent` reason-only *can* still read
-  (agy has no tool-disable flag), so it is kept to the diff only because nothing wires
-  the repo in. `codex_agent` reason-only is a `--sandbox read-only` mode, so it *can*
-  already read the repo and run read-only commands; you still give it the diff inline
-  for a uniform, scoped input. If a finding genuinely needs wider context: `codex_agent` (default read-only) and
-  `claude_agent` with `mode: "read"` (plan mode) both permit repo reads — point them at the
-  repo with `working_dir` (else they read the bridge server's own directory). `antigravity_agent`
-  has **no read-only tier**, so `mode: "act"` is the only way to let it touch the repo — and
-  that grants *full unattended execution* (`--dangerously-skip-permissions`: file writes +
-  arbitrary commands), so reach for it sparingly, scope it with `working_dir`, and contain it
-  further with `sandbox: true` (edits land in an isolated scratch dir instead of `working_dir`).
-- **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep
-  a review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
+- **Repo-reading default vs. inline fallback.** Reviewers read the repo themselves (the
+  recipe in step 1), so the orchestrator never compresses a diff into the `task` — killing
+  the failure mode where a trimmed/paraphrased diff produces phantom findings or hides real
+  ones. The costs: a repo-reading run is *agentic* (more tool calls, slower; codex can burn
+  usage quota), and reviewers can vary slightly in what they choose to read — so pin the
+  **diff command** in every prompt so they all judge the same change. Use **inline mode**
+  only when the change isn't in a reachable repo, or you need byte-identical input.
+- **`antigravity_agent` `reason` is NOT write-safe.** Unlike `claude_agent` (`--tools ""` →
+  no tools) and `codex_agent` (`--sandbox read-only`), agy's `reason` tier merely omits the
+  permission-bypass flag — but agy still performs **unattended file writes** non-
+  interactively when pointed at a writable `working_dir` (verified: it created a file). So a
+  repo-reading agy reviewer **must** add `sandbox: true`; the sandbox (not the absence of the
+  bypass flag) is what protects your tree. In *inline* mode agy stays safe only because no
+  `working_dir` is wired in, so it sees the bridge's cwd rather than your repo.
+- **Delegation depth.** Fanning out spawns child agents; two independent safeguards keep a
+  review round shallow. (1) The **hop guard** caps *depth*: the bridge reads
   `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and
-  increments it for each child — bounding any A→B→A chain regardless of what an acting
-  agent does. (2) Every reason-only child (the finders/verifiers here) is spawned with
-  `AGENT_NO_DELEGATE=1`, and the bridge refuses to spawn from a process carrying that
-  flag — so a reason-only reviewer genuinely **cannot** delegate further, including
-  `codex_agent`'s read-only sandbox (which can still run read-only commands). A single
-  review round, being all reason-only, therefore can't nest at all.
+  increments it for each child — bounding any A→B→A chain. (2) Every **non-acting** child —
+  `reason` or `read` mode, which is every reviewer in the recommended recipes (claude
+  `read`, codex `read`, agy `reason`+`sandbox`) — is spawned with `AGENT_NO_DELEGATE=1`, and
+  the bridge refuses to spawn from a process carrying that flag, so a reviewer genuinely
+  **cannot** delegate further. A round built from those recipes therefore can't nest at all.
+  The one way to lose this: agy in `mode: "act"` — an *acting* child gets no freeze and is
+  bounded only by the hop guard, which is exactly why step 1 uses agy `reason`+`sandbox`,
+  not `act`+`sandbox`.
 - **Tool behavior is authoritative in the tool descriptions.** This skill summarizes what
   each backend's `mode` (reason/read/act) / `working_dir` / `sandbox` options do, but the
   bridge's own MCP tool descriptions (generated from `cmd/agent-bridge-mcp/main.go`) are
