@@ -47,7 +47,7 @@ review/verification of whatever Gemini produces (always verify its output).
 | `add_dirs` | Extra workspace dirs for context. |
 | `model` | Optional; the CLI default is fine. Pass a name for a specific model (`agy models` lists Gemini's). |
 | `timeout_seconds` | Default 300, max 1800. Raise for big tasks. |
-| `mode` | **`reason`** by default (reason/answer only). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). gemini has no `read` tier. (Legacy `allow_tools: true` ≡ `act`.) |
+| `mode` | **`reason`** by default (reason/answer only). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). gemini has no `read` tier. |
 | `sandbox` | **false by default.** When true, agy confines the agent to an isolated scratch dir, so its edits do NOT reach `working_dir` — only for a "compute but don't touch my files" run. Leave it off for real edits. |
 
 ### Two modes (gemini)

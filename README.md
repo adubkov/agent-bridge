@@ -37,7 +37,7 @@ Spawns a Gemini agent via the Antigravity `agy` CLI.
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
-| `mode` | string | `reason` | Access tier: `reason` (no tools) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. Legacy `allow_tools: true` ≡ `act`. |
+| `mode` | string | `reason` | Access tier: `reason` (no tools) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. |
 | `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Gemini-only** — `claude_agent` has no `sandbox` param. |
 
 ## Tool: `claude_agent`
@@ -55,7 +55,7 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
-| `mode` | string | `reason` | Access tier: `reason` (no tools) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). Legacy `allow_tools: true` ≡ `act`. |
+| `mode` | string | `reason` | Access tier: `reason` (no tools) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
 `--sandbox` is never passed to `claude`.
@@ -75,7 +75,7 @@ sandbox* (`reason`/`read`) and *full, unsandboxed access* (`act`) rather than of
 | `timeout_seconds` | number | 300 (max 1800) | Codex `exec` has **no** internal timeout flag; the timeout is enforced purely by the process context deadline. |
 | `model` | string | provider default | Optional; `--model <model>` when non-empty. **Omit** to use Codex's recommended *frontier* model (most-capable, auto-current). |
 | `effort` | string | model default | Optional reasoning effort; passed as `-c model_reasoning_effort=<level>` when non-empty (e.g. `minimal\|low\|medium\|high`). |
-| `mode` | string | `reason` | Access tier: `reason`/`read` are **both** read-only (`--sandbox read-only`) — Codex reads/reasons but cannot edit or run effectful commands; `act` → `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access. Legacy `allow_tools: true` ≡ `act`. |
+| `mode` | string | `reason` | Access tier: `reason`/`read` are **both** read-only (`--sandbox read-only`) — Codex reads/reasons but cannot edit or run effectful commands; `act` → `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access. |
 
 There is **no `sandbox` param** on `codex_agent` — `mode` already selects
 read-only vs. full access. Codex always runs with `--skip-git-repo-check` (so it
@@ -93,7 +93,7 @@ exploration (read/grep files via `--permission-mode plan`, no edits or commands)
 let an agent actually act on your files/system, set `mode: "act"`, which passes
 `--dangerously-skip-permissions` to the underlying CLI (the child's approval gates are
 off — this is unattended execution). Scope it with `working_dir`; the agent's edits
-land there. (Legacy `allow_tools: true` still works and is equivalent to `mode: "act"`.)
+land there.
 
 For `gemini_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
 the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.

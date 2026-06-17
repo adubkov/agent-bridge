@@ -1168,13 +1168,6 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("legacy allow_tools:true still maps to act (skip-permissions)", func(t *testing.T) {
-		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "allow_tools": true})
-		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
-			t.Errorf("allow_tools should pass the skip flag; args=%v", a)
-		}
-	})
-
 	t.Run("mode param: act / read / reason + rejections", func(t *testing.T) {
 		// act → skip-perms
 		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "mode": "act"})
@@ -1386,7 +1379,7 @@ func TestToolSchemas(t *testing.T) {
 		t.Errorf("gemini description should state sandboxing is OFF by default: %q", gemini.Description)
 	}
 
-	// The codex description must convey that its default (allow_tools:false) is a
+	// The codex description must convey that its default (mode reason/read) is a
 	// read-only sandbox, not a pure no-tools mode — the key semantic difference.
 	if !strings.Contains(codex.Description, "read-only") {
 		t.Errorf("codex description should state its default is read-only: %q", codex.Description)
@@ -1414,11 +1407,11 @@ func TestBackendRegistry(t *testing.T) {
 			if b.promptFlag != "" && b.promptPositional {
 				t.Errorf("backend %q sets both promptFlag and promptPositional (ambiguous)", b.tool)
 			}
-			// Every backend exposes allow_tools, and modeNote/buildArgs derive the
-			// enabled mode from skipPermsFlag. An empty one would render the header
+			// Every backend has an `act` tier, and modeNote/buildArgs derive the
+			// enabled note from skipPermsFlag. An empty one would render the header
 			// "tool-use: ENABLED ()" while buildArgs silently passes no skip flag.
 			if b.skipPermsFlag == "" {
-				t.Errorf("backend %q has empty skipPermsFlag; an allow_tools run would claim ENABLED with no flag", b.tool)
+				t.Errorf("backend %q has empty skipPermsFlag; an act-mode run would claim ENABLED with no flag", b.tool)
 			}
 			if seen[b.tool] {
 				t.Errorf("duplicate tool name %q in registry", b.tool)

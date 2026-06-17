@@ -25,8 +25,7 @@
 //   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
 //
 // Read mode: claude_agent passes --permission-mode plan; codex_agent reuses its
-// --sandbox read-only; gemini_agent has NO read tier. A legacy `allow_tools: true`
-// bool still works and is equivalent to `mode: "act"`.
+// --sandbox read-only; gemini_agent has NO read tier.
 //
 // Scope read/act runs with `working_dir`. For gemini_agent the `--sandbox` flag is
 // OFF by default because it confines edits to an isolated scratch dir (set
@@ -150,12 +149,12 @@ const (
 
 	geminiModeDescription = "Access mode (default `reason`). `reason` = reason/answer only, no tools. `act` = edit " +
 		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). gemini_agent has NO " +
-		"read-only tier, so `read` is rejected — use `reason` or `act`. (Legacy: `allow_tools: true` ≡ `act`.)"
+		"read-only tier, so `read` is rejected — use `reason` or `act`."
 
 	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
 		"read-only exploration: read/grep/glob files, no edits or command execution (passes --permission-mode plan). " +
 		"`act` = full edit + command execution UNATTENDED (passes --dangerously-skip-permissions; consumes credits). " +
-		"Scope `read`/`act` with working_dir. (Legacy: `allow_tools: true` ≡ `act`.)"
+		"Scope `read`/`act` with working_dir."
 
 	codexToolDescription = "Spawn an OpenAI Codex agent (via the `codex` CLI, `codex exec`) to perform a task and return " +
 		"its response. Give it a self-contained task in `task`; it runs non-interactively and returns Codex's full " +
@@ -171,7 +170,7 @@ const (
 	codexModeDescription = "Access mode (default `reason`). `reason` and `read` are BOTH read-only (--sandbox " +
 		"read-only): read files + run read-only commands, no writes — codex has no pure no-tools mode. `act` = full, " +
 		"unsandboxed file/command access (passes --dangerously-bypass-approvals-and-sandbox). Use with care; scope it " +
-		"with working_dir. (Legacy: `allow_tools: true` ≡ `act`.)"
+		"with working_dir."
 
 	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
 		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
@@ -616,17 +615,12 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 			workingDir:     req.GetString("working_dir", ""),
 		}
 
-		// Resolve the access tier. The `mode` enum (reason | read | act) is canonical;
-		// a legacy `allow_tools` bool is still honored when `mode` is omitted
-		// (allow_tools:true ≡ act). `read` is rejected for backends with no read-only
-		// tier (gemini).
+		// Resolve the access tier from the `mode` enum (reason | read | act); an
+		// omitted/blank mode means reason. `read` is rejected for backends with no
+		// read-only tier (gemini).
 		mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "")))
 		if mode == "" {
-			if req.GetBool("allow_tools", false) {
-				mode = modeAct
-			} else {
-				mode = modeReason
-			}
+			mode = modeReason
 		}
 		switch mode {
 		case modeReason:
