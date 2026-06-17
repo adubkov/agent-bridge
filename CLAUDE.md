@@ -1,0 +1,58 @@
+# CLAUDE.md — working notes for agents in this repo
+
+`agent-bridge` is an MCP server (`cmd/agent-bridge-mcp`) that exposes other coding-agent
+CLIs as spawnable sub-agent tools: `antigravity_agent` (Antigravity/`agy`, Gemini),
+`claude_agent` (`claude`), `codex_agent` (`codex`). Backends are declared in one in-code
+registry (`backends` in [main.go](cmd/agent-bridge-mcp/main.go)); the tool descriptions
+there are the **source of truth** for per-backend behavior. See [README.md](README.md) for
+the user-facing docs and [skills/](skills/) for the playbooks.
+
+## Build & test
+
+```sh
+make build              # compile ./agent-bridge-mcp (the canonical binary)
+go test ./...           # unit tests (table-driven; no network/CLIs needed)
+make smoke-antigravity  # live PONG round-trip through agy (needs agy authed)
+make install-claude     # install the plugin into Claude Code (frozen cache copy)
+make install-all        # install into every host whose CLI is on PATH (claude/agy/codex)
+```
+
+Installs are **frozen snapshots** — `make install-*` copies the freshly built binary into
+each host's own plugin dir, so editing this checkout never changes an already-installed
+agent. Re-run an `install-*` target to push a new build.
+
+## Backend gotchas (load-bearing — verified the hard way)
+
+**`agy` (antigravity) must run under a pseudo-terminal.** agy's agentic `--print` loop only
+runs to completion with a controlling TTY; spawned with plain pipes it **hangs** until the
+hard kill, burning the whole timeout. The bridge therefore runs the agy backend under a pty
+(`needsPTY` + `runOnPTY` in [proc_pty_unix.go](cmd/agent-bridge-mcp/proc_pty_unix.go)).
+`claude`/`codex` are built for headless `--print`/`exec` and use plain pipes — do **not** add
+a pty for them. When touching `runOnPTY`: keep the goroutine drain + grace-period
+force-close of the master (a synchronous `io.Copy` before `Wait` deadlocks if a grandchild
+escapes the process-group kill and holds the slave open), and keep `cleanPTYOutput` (strip
+ANSI/CR so results stay parseable). Under a pty stdout+stderr **merge**, so error/timeout
+paths tail-truncate the merged stream for pty backends (`backend.failureStdout`).
+
+**`agy --sandbox` is NOT a write guard.** It enables agy's *terminal* restrictions only; a
+file write under `sandbox: true` still lands in `working_dir` (verified). agy also has **no
+write-safe tier** (unlike `claude --tools ""` / `codex --sandbox read-only`) and routinely
+saves a scratch `git diff` dump into `working_dir` while reviewing. To keep agy off your
+tree, point `working_dir` at a **throwaway `git worktree`** (or omit it) — not `--sandbox`.
+
+**agy latency is highly variable** (~75–270s observed for the same Pro-tier repo review), so
+give agy generous `timeout_seconds` (≥300) rather than reading a slow run as a hang.
+
+**Don't `git add -A` blind.** Sub-agents pointed at the repo write scratch `git diff` dumps
+into the working tree (e.g. `diff_pr8.txt`, `diff.txt`); `.gitignore` covers the common
+patterns, but stage explicit paths so debris can't slip into a commit.
+
+## Repo conventions
+
+- The built binary `agent-bridge-mcp` lives at the **repo root** and is gitignored as
+  `/agent-bridge-mcp` — **anchored** with a leading slash on purpose, so the pattern does not
+  also match the `cmd/agent-bridge-mcp/` source dir and silently ignore new `.go` files
+  there.
+- `cmd/agent-bridge-mcp/proc_*.go` are platform-split via build tags (`unix` vs `!unix`);
+  add new OS-specific helpers the same way and keep a non-unix fallback so the package builds
+  everywhere.
