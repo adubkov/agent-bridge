@@ -15,12 +15,30 @@ The server also registers a no-spawn **`list_agents`** discovery tool (probe
 `resolveTier`/`pickModel` keep `buildArgs` subprocess-free; auth uses per-CLI parsers
 (`parseClaudeAuth`/`parseCodexAuth`, since exit codes alone are unreliable).
 
+## Keep this file in sync (rule)
+
+**This file is an agent's first source of truth here — keep it current in the SAME change
+that makes it stale, never as a follow-up.** When a change touches any of:
+
+- the backend registry or tool/param behavior — `backends`, `tierSpec`/`tiers`, `authCheck`/
+  `authParse`, a new/removed tool, or any tool / `mode` / `effort` / `tier` description — in
+  [main.go](cmd/agent-bridge-mcp/main.go) / [discover.go](cmd/agent-bridge-mcp/discover.go),
+- the load-bearing backend gotchas below (pty handling, agy sandbox/worktree, latency),
+- the build / test / install / smoke targets in the [Makefile](Makefile), or
+- the repo conventions (gitignore anchoring, the `proc_*.go` build-tag split),
+
+reconcile the matching section here in the same commit. The MCP tool descriptions in
+`main.go` stay the **source of truth** for per-backend behavior; this file summarizes and
+points at them, so update the summary whenever they move. If a change leaves nothing here
+stale, no edit is needed — don't pad it.
+
 ## Build & test
 
 ```sh
 make build              # compile ./agent-bridge-mcp (the canonical binary)
 go test ./...           # unit tests (table-driven; no network/CLIs needed)
 make smoke-antigravity  # live PONG round-trip through agy (needs agy authed)
+make smoke-list-agents  # list_agents discovery smoke (probe=installed; needs no CLIs authed)
 make install-claude     # install the plugin into Claude Code (frozen cache copy)
 make install-all        # install into every host whose CLI is on PATH (claude/agy/codex)
 ```
