@@ -148,7 +148,7 @@ input across finders.
 - `working_dir` = the repo root (absolute path). Without it the spawned agent runs in the
   *bridge server's* own cwd, not your repo, and sees nothing.
 - the **exact** diff command in the `task`, so every reviewer judges the *same* change —
-  e.g. `git diff --function-context <base>...<head>` (a PR ref, `@{upstream}...HEAD`, or
+  e.g. `git diff <base>...<head>` (a PR ref, `@{upstream}...HEAD`, or
   paths the user named). Tell it to run that, review those changes, and read surrounding
   files only as needed.
 - the per-backend **read-only recipe** below. Each is verified to read the repo, run
@@ -167,15 +167,17 @@ input across finders.
 
 First make sure the repo is in the state you want reviewed — the PR branch checked out and
 the base ref present locally — since each reviewer reads the live working tree. **For agy
-specifically**, create a throwaway worktree and use it as agy's `working_dir`:
-`git worktree add --detach /tmp/review-wt HEAD` (it shares the repo's objects and refs, so
-`git diff <base>...<head>` still resolves inside it); remove it with `git worktree remove`
-afterward. This keeps agy's scratch dumps and any unattended edits off your real checkout —
-claude/codex `read` mode is write-safe and can read the live checkout directly.
+specifically**, create a throwaway worktree and use it as agy's `working_dir`. Give it a
+**unique path per run** so concurrent reviews never collide on a fixed name:
+`wt="$(mktemp -d)/wt"; git worktree add --detach "$wt" HEAD` (the worktree shares the repo's
+objects and refs, so `git diff <base>...<head>` still resolves inside it); remove it when
+done with `git worktree remove "$wt"`. This keeps agy's scratch dumps and any unattended
+edits off your real checkout — claude/codex `read` mode is write-safe and can read the live
+checkout directly.
 
 **Context is now (almost) free.** Because reviewers read the repo, the old "how much diff
-to embed" ladder mostly dissolves: each can pull `--function-context`, open whole files,
-and chase cross-file callers / guards / type-defs itself. Missing **code** context stops
+to embed" ladder mostly dissolves: each can open whole files, expand the enclosing
+functions, and chase cross-file callers / guards / type-defs itself. Missing **code** context stops
 being the orchestrator's problem. What model diversity *still* uniquely buys is
 **external/runtime** knowledge — how a CLI, library, or framework actually behaves — which
 no amount of context substitutes for; that is why cross-family reviewers matter as much as
@@ -225,7 +227,7 @@ Give every model the **same brief** so the diversity comes from the model, not t
 **Finder prompt template (repo-reading default):**
 
 > You are an independent senior reviewer with `working_dir` set to a git repo. Run
-> `git diff --function-context <base>...<head>` to see the change under review, then review
+> `git diff <base>...<head>` to see the change under review, then review
 > it for CORRECTNESS bugs (logic errors, wrong conditions, off-by-one, nil/undefined,
 > missing error handling, concurrency hazards, broken call sites). You MAY read the
 > surrounding files, callers, and type definitions for context, but **review only that
@@ -261,7 +263,7 @@ that serializes tool calls the two waves still hold but wall-clock is the sum.
 **Verifier prompt template (repo-reading default):**
 
 > Another reviewer flagged the finding below. With `working_dir` set to a git repo, run
-> `git diff --function-context <base>...<head>` — and read call sites, guards, and type
+> `git diff <base>...<head>` — and read call sites, guards, and type
 > defs as needed — to decide if it is real. **Inspect only — no edits, state-changing
 > commands, or delegation.** Answer with ONLY one JSON object:
 > `{"verdict": "CONFIRMED|PLAUSIBLE|REFUTED", "reason": "quote the line or guard that proves it"}`.
