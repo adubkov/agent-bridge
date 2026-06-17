@@ -104,6 +104,7 @@ type runOpts struct {
 	allowTools     bool
 	sandbox        bool // gemini-only boolean --sandbox; ignored by claude/codex
 	model          string
+	effort         string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by gemini
 	addDirs        []string
 	workingDir     string
 }
@@ -125,7 +126,8 @@ const (
 		"edits / command execution) — set `allow_tools: true` to let it act, which passes --dangerously-skip-permissions " +
 		"so Claude auto-approves its own permission prompts and runs UNATTENDED (it will edit files / run commands and " +
 		"consume Claude credits without further confirmation). Use `add_dirs` for workspace context and `working_dir` " +
-		"to set where it runs. Note: even reason-only runs consume Claude credits."
+		"to set where it runs. Set `effort` (low|medium|high|xhigh|max) to control reasoning effort. Note: even " +
+		"reason-only runs consume Claude credits."
 
 	geminiAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
 		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
@@ -141,7 +143,8 @@ const (
 		"and reason but CANNOT edit files or run effectful commands — note this is a read-only sandbox, not a pure " +
 		"no-tools mode. Set `allow_tools: true` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
 		"so it runs UNATTENDED with full file/command access and NO sandbox, with edits landing in `working_dir`. Use " +
-		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Codex runs even outside a " +
+		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Set `effort` (e.g. " +
+		"low|medium|high) to control reasoning effort (passed as `-c model_reasoning_effort`). Codex runs even outside a " +
 		"Git repo (--skip-git-repo-check is always passed). The tool returns Codex's final message; its session banner " +
 		"and step-by-step transcript go to stderr and are surfaced only if the run fails or times out."
 
@@ -153,6 +156,12 @@ const (
 	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
 		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
 		"confined 'compute but don't touch my files' run."
+
+	claudeEffortDescription = "Optional reasoning effort for this run (passed as `--effort`). Accepts low | medium | " +
+		"high | xhigh | max. Leave empty for the model's default effort."
+
+	codexEffortDescription = "Optional reasoning effort for this run (passed as `-c model_reasoning_effort=<value>`). " +
+		"Accepts minimal | low | medium | high (model-dependent). Leave empty for the default effort."
 )
 
 // backend declares one CLI adapter as DATA: the shared run/timeout/truncate/
@@ -175,9 +184,16 @@ type backend struct {
 	promptFlag    string // "--print" (flag-style) | "" (positional, see promptPositional)
 	timeoutFlag   string // "--print-timeout" (gemini) | "" (claude/codex: ctx deadline only)
 	modelFlag     string // "--model"
+	effortFlag    string // "--effort" (claude) | "" (codex uses effortConfigKey; gemini has no effort lever)
 	addDirFlag    string // "--add-dir"
 	skipPermsFlag string // "--dangerously-skip-permissions" (gemini/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
 	sandboxFlag   string // "--sandbox" (gemini boolean) | "" (claude/codex)
+
+	// effortConfigKey carries reasoning effort via codex's `-c <key>=<value>` config
+	// form (effortConfigKey = "model_reasoning_effort") when the CLI has no dedicated
+	// effort FLAG. "" for backends that use effortFlag (claude) or have no effort lever
+	// (gemini, where effort is selected through the model name instead).
+	effortConfigKey string
 
 	// promptPositional makes the task a trailing positional argument (emitted LAST,
 	// after subcmd and every flag) instead of promptFlag's value — for CLIs like
@@ -206,10 +222,16 @@ type backend struct {
 
 	description    string // model-facing tool description
 	allowToolsDesc string // description for the allow_tools param
+	effortDesc     string // description for the effort param ("" if the backend has no effort lever)
 }
 
 // supportsSandbox reports whether the backend exposes the sandbox option.
 func (b backend) supportsSandbox() bool { return b.sandboxFlag != "" }
+
+// appliesEffort reports whether the backend exposes a reasoning-effort lever (a
+// dedicated flag or codex's config-key form). gemini has none — its effort lives in
+// the model name — so its tool omits the effort param and ignores any value passed.
+func (b backend) appliesEffort() bool { return b.effortFlag != "" || b.effortConfigKey != "" }
 
 // resolveBin finds the backend's CLI executable: binEnv override → PATH →
 // ~/.local/bin/<cliName> → bare cliName. The explicit fallback matters because a
@@ -248,6 +270,17 @@ func (b backend) buildArgs(o runOpts) []string {
 	}
 	if b.modelFlag != "" && strings.TrimSpace(o.model) != "" {
 		args = append(args, b.modelFlag, o.model)
+	}
+	// Reasoning effort: a dedicated flag (claude --effort) or codex's config-key form
+	// (-c model_reasoning_effort=<value>). gemini has neither, so its effort is dropped
+	// here (it is selected through the model name instead).
+	if strings.TrimSpace(o.effort) != "" {
+		switch {
+		case b.effortFlag != "":
+			args = append(args, b.effortFlag, o.effort)
+		case b.effortConfigKey != "":
+			args = append(args, "-c", b.effortConfigKey+"="+o.effort)
+		}
 	}
 	if b.addDirFlag != "" {
 		for _, d := range o.addDirs {
@@ -295,6 +328,21 @@ func (b backend) modeNote(o runOpts) string {
 	return note
 }
 
+// selectionNote summarizes the model/effort actually requested, for the result
+// header — so the caller (and the user) can confirm an override took effect. model
+// is always shown ("default" when unset); effort only for backends that apply it.
+func (b backend) selectionNote(o runOpts) string {
+	model := strings.TrimSpace(o.model)
+	if model == "" {
+		model = "default"
+	}
+	note := "model=" + model
+	if b.appliesEffort() && strings.TrimSpace(o.effort) != "" {
+		note += " effort=" + o.effort
+	}
+	return note
+}
+
 // backends is the registry and SINGLE SOURCE OF TRUTH: adding a CLI coding-agent
 // is one entry here — no new code, and main() iterates it to register tools. The
 // named vars below are derived from it purely for convenient test reference, so a
@@ -320,11 +368,13 @@ var backends = []backend{
 		binEnv:        "CLAUDE_BIN",
 		promptFlag:    "--print",
 		modelFlag:     "--model",
+		effortFlag:    "--effort",
 		addDirFlag:    "--add-dir",
 		skipPermsFlag: "--dangerously-skip-permissions",
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
 		description:    claudeToolDescription,
 		allowToolsDesc: claudeAllowToolsDescription,
+		effortDesc:     claudeEffortDescription,
 	},
 	{
 		tool:             "codex_agent",
@@ -333,6 +383,7 @@ var backends = []backend{
 		subcmd:           []string{"exec"},
 		promptPositional: true,
 		modelFlag:        "--model",
+		effortConfigKey:  "model_reasoning_effort",
 		addDirFlag:       "--add-dir",
 		skipPermsFlag:    "--dangerously-bypass-approvals-and-sandbox",
 		extraArgs:        []string{"--skip-git-repo-check", "--color", "never"},
@@ -344,6 +395,7 @@ var backends = []backend{
 		// (allow_tools toggles read-only sandbox vs. the bypass flag instead).
 		description:    codexToolDescription,
 		allowToolsDesc: codexAllowToolsDescription,
+		effortDesc:     codexEffortDescription,
 	},
 }
 
@@ -466,7 +518,10 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 			mcp.Description(fmt.Sprintf("Max seconds to wait for the agent (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)),
 		),
 		mcp.WithString("model",
-			mcp.Description("Optional model to use (passed as --model). Leave empty for the CLI default."),
+			mcp.Description("Optional model (passed as --model); leave empty for the CLI/provider default (Codex maps that "+
+				"to its recommended frontier model). Claude takes family aliases like `opus`/`sonnet`/`haiku` that always "+
+				"resolve to the latest; agy/codex take explicit names (list them with `agy models`). For reasoning effort "+
+				"see the `effort` param (claude_agent / codex_agent)."),
 		),
 		mcp.WithBoolean("allow_tools",
 			mcp.Description(allowToolsDescription),
@@ -478,6 +533,9 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 // option for backends that support it.
 func newTool(b backend) mcp.Tool {
 	opts := commonToolOptions(b.description, b.allowToolsDesc)
+	if b.appliesEffort() {
+		opts = append(opts, mcp.WithString("effort", mcp.Description(b.effortDesc)))
+	}
 	if b.supportsSandbox() {
 		opts = append(opts, mcp.WithBoolean("sandbox", mcp.Description(sandboxDescription)))
 	}
@@ -511,6 +569,7 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 			timeoutSeconds: timeoutSeconds,
 			allowTools:     req.GetBool("allow_tools", false),
 			model:          strings.TrimSpace(req.GetString("model", "")),
+			effort:         strings.TrimSpace(req.GetString("effort", "")),
 			workingDir:     req.GetString("working_dir", ""),
 		}
 
@@ -630,7 +689,7 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 		}
 	}
 
-	header := fmt.Sprintf("[%s | %s | %s]\n\n", b.tool, modeNoteStr, elapsed)
+	header := fmt.Sprintf("[%s | %s | %s | %s]\n\n", b.tool, modeNoteStr, b.selectionNote(o), elapsed)
 	return mcp.NewToolResultText(header + out), nil
 }
 

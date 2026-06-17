@@ -15,7 +15,10 @@ can — when allowed — edit files and run commands in a working directory you 
 it. `codex_agent` is an alternative target with the same `task` / `working_dir` /
 `add_dirs` / `allow_tools` interface; note its `allow_tools: false` is a *read-only
 sandbox* (Codex has no pure no-tools mode), and `allow_tools: true` grants full
-unsandboxed access — otherwise call it the same way.
+unsandboxed access — otherwise call it the same way. `claude_agent` and `codex_agent`
+also take an `effort` param (reasoning effort: claude `low|medium|high|xhigh|max`,
+codex `minimal|low|medium|high`); `gemini_agent` has none — it selects effort through
+the model name.
 
 ## When to use it
 
@@ -41,6 +44,7 @@ review/verification of whatever Gemini produces (always verify its output).
 | `task` (required) | A **complete, self-contained** prompt. Gemini does not share your context — spell out the goal, the files, and the acceptance criteria. |
 | `working_dir` | Absolute path the agent runs in (set this for file work). |
 | `add_dirs` | Extra workspace dirs for context. |
+| `model` | Optional; the CLI default is fine. Pass a name for a specific model (`agy models` lists Gemini's). |
 | `timeout_seconds` | Default 300, max 1800. Raise for big tasks. |
 | `allow_tools` | **false by default** (reason/answer only). Set **true** to let it edit files in `working_dir` / run commands (auto-approves its permission prompts). |
 | `sandbox` | **false by default.** When true, agy confines the agent to an isolated scratch dir, so its edits do NOT reach `working_dir` — only for a "compute but don't touch my files" run. Leave it off for real edits. |

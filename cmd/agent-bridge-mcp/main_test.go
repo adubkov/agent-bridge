@@ -141,6 +141,16 @@ func TestBuildClaudeArgs(t *testing.T) {
 			want: []string{"--print", "compute"},
 		},
 		{
+			name: "effort adds --effort after the task",
+			in:   runOpts{task: "think hard", timeoutSeconds: 300, effort: "xhigh"},
+			want: []string{"--print", "think hard", "--effort", "xhigh"},
+		},
+		{
+			name: "model then effort then add-dir ordering",
+			in:   runOpts{task: "t", timeoutSeconds: 300, model: "opus", effort: "high", addDirs: []string{"/a"}},
+			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a"},
+		},
+		{
 			name: "no --print-timeout even with a timeout set",
 			in:   runOpts{task: "wait", timeoutSeconds: 600},
 			want: []string{"--print", "wait"},
@@ -224,6 +234,11 @@ func TestBuildGeminiArgs(t *testing.T) {
 			want: []string{"--print", "compute", "--print-timeout", "300s", "--sandbox"},
 		},
 		{
+			name: "effort is ignored for gemini (no --effort, no -c; effort is in the model name)",
+			in:   runOpts{task: "x", timeoutSeconds: 300, effort: "high"},
+			want: []string{"--print", "x", "--print-timeout", "300s"},
+		},
+		{
 			name: "all options combined, correct ordering",
 			in: runOpts{
 				task:           "full task",
@@ -285,6 +300,16 @@ func TestBuildCodexArgs(t *testing.T) {
 			name: "blank model dropped; sandbox bool ignored (codex has no boolean --sandbox)",
 			in:   runOpts{task: task, timeoutSeconds: 300, model: "  ", sandbox: true},
 			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "effort emits -c model_reasoning_effort among flags, before the -- prompt",
+			in:   runOpts{task: task, timeoutSeconds: 300, effort: "high"},
+			want: []string{"exec", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "model then effort both land before the trailing prompt",
+			in:   runOpts{task: task, timeoutSeconds: 300, model: "gpt-5.5", effort: "high"},
+			want: []string{"exec", "--model", "gpt-5.5", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
 		},
 		{
 			name: "no --print-timeout even with a custom timeout",
@@ -1071,6 +1096,21 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
+	t.Run("effort: claude --effort, codex -c model_reasoning_effort, gemini ignores", func(t *testing.T) {
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "effort": "xhigh"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "--effort", "xhigh") {
+			t.Errorf("claude should pass --effort xhigh; args=%v", a)
+		}
+		res, _ = call(t, codexBackend, map[string]any{"task": "x", "effort": "high"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "-c", "model_reasoning_effort=high") {
+			t.Errorf("codex should pass -c model_reasoning_effort=high; args=%v", a)
+		}
+		res, _ = call(t, geminiBackend, map[string]any{"task": "x", "effort": "high"})
+		if a := handlerEchoArgs(t, res); argsContain(a, "--effort") || argsContain(a, "model_reasoning_effort=high") {
+			t.Errorf("gemini must ignore effort (no lever); args=%v", a)
+		}
+	})
+
 	t.Run("working_dir sets the child cwd", func(t *testing.T) {
 		dir := t.TempDir()
 		// The fake writes a marker into its cwd; if working_dir applied, it lands in dir.
@@ -1213,6 +1253,18 @@ func TestToolSchemas(t *testing.T) {
 		t.Error("codex tool must NOT expose a sandbox param")
 	}
 
+	// effort is claude/codex-only; gemini selects effort via the model name, so it
+	// must NOT expose an effort param.
+	if _, ok := claude.InputSchema.Properties["effort"]; !ok {
+		t.Error("claude tool should expose the effort param")
+	}
+	if _, ok := codex.InputSchema.Properties["effort"]; !ok {
+		t.Error("codex tool should expose the effort param")
+	}
+	if _, ok := gemini.InputSchema.Properties["effort"]; ok {
+		t.Error("gemini tool must NOT expose an effort param")
+	}
+
 	// The gemini description must not claim sandbox-by-default (the bug this fixes),
 	// and should state sandboxing is off by default.
 	if strings.Contains(gemini.Description, "by default) runs it in a restricted sandbox") {
@@ -1281,6 +1333,36 @@ func TestBackendRegistry(t *testing.T) {
 			}
 			if _, ok := tool.InputSchema.Properties["sandbox"]; ok != b.supportsSandbox() {
 				t.Errorf("tool %q sandbox-param=%v; supportsSandbox()=%v", b.tool, ok, b.supportsSandbox())
+			}
+			// The effort param appears iff the backend has an effort lever.
+			if _, ok := tool.InputSchema.Properties["effort"]; ok != b.appliesEffort() {
+				t.Errorf("tool %q effort-param=%v; appliesEffort()=%v", b.tool, ok, b.appliesEffort())
+			}
+			// A backend that applies effort must carry a description for the param.
+			if b.appliesEffort() && b.effortDesc == "" {
+				t.Errorf("backend %q applies effort but has empty effortDesc", b.tool)
+			}
+		})
+	}
+}
+
+func TestSelectionNote(t *testing.T) {
+	tests := []struct {
+		name string
+		b    backend
+		o    runOpts
+		want string
+	}{
+		{"gemini default", geminiBackend, runOpts{}, "model=default"},
+		{"gemini ignores effort (no lever)", geminiBackend, runOpts{effort: "high"}, "model=default"},
+		{"claude model + effort", claudeBackend, runOpts{model: "opus", effort: "xhigh"}, "model=opus effort=xhigh"},
+		{"claude model only", claudeBackend, runOpts{model: "sonnet"}, "model=sonnet"},
+		{"codex default model + effort", codexBackend, runOpts{effort: "high"}, "model=default effort=high"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.b.selectionNote(tt.o); got != tt.want {
+				t.Errorf("selectionNote(%+v) = %q; want %q", tt.o, got, tt.want)
 			}
 		})
 	}

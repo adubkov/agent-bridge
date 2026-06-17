@@ -38,6 +38,54 @@ setup.
   Prefer reviewer families OTHER than your host; that is where the diversity comes
   from (see Independence).
 
+## Model & effort selection
+
+Each finder/verifier spawn takes a `model` and — for `claude_agent` / `codex_agent` — an
+`effort` param. Default to the **most capable** model per family, named so it stays current,
+and **honor any user override** from the orchestrator prompt. (This tier controls
+model/effort only; whether you cross-verify is the separate Fast-mode choice below — the two
+compose.)
+
+### Default tiers — drive selection from a tier, default `deep`
+
+| Tier | `claude_agent` | `codex_agent` | `gemini_agent` |
+|---|---|---|---|
+| **deep** (default) | `model: opus`, `effort: xhigh` | `model:` *(omit)*, `effort: high` | `model:` discovered `*Pro* (High)` |
+| **fast** | `model: sonnet`, `effort: medium` | `model:` *(omit)*, `effort: low` | `model:` discovered `*Flash* (Medium)` |
+
+Why these stay current (no hardcoded version strings):
+
+- **Claude** — `opus`/`sonnet` are *aliases* that always resolve to the latest model in that
+  family. Pass them verbatim; effort is the separate `effort` param.
+- **Codex** — **omit `model`**: Codex defaults to its *recommended frontier* model, which
+  OpenAI updates, so "no model" already means most-capable-and-current. Express the tier with
+  `effort` only. (Do **not** use `codex-auto-review` — it's an approval-gating model, not a
+  code reviewer.)
+- **Gemini** — agy has no alias and bakes effort into the model *name*, so **discover** at
+  review start: run `agy models`, pick the line matching the tier (deep → a `*Pro* (High)`
+  entry; fast → a `*Flash* (Medium)` entry), and pass that label as `model`. Resolve once and
+  reuse across the wave. If agy rejects the label, fall back to its default by omitting `model`.
+
+Effort vocab differs across families — Claude takes `low|medium|high|xhigh|max`, Codex tops out
+at `high`. Use the per-family value above; if a user asks for "max" on Codex, map it to `high`.
+
+### User overrides (from the orchestrator prompt) — honor them
+
+Resolve each reviewer's `model`/`effort` with this precedence, highest first:
+
+1. **Explicit per-agent override** the user stated — e.g. "run Claude on `opus` `max`", "use
+   `gpt-5.4-mini` for codex", "gemini on low effort". It wins for that agent, **per field**
+   (overriding only Claude's effort leaves its model at the tier default). Pass the user's
+   values **verbatim** to `model`/`effort` — don't "correct" them; the CLI validates (Claude
+   warns and falls back on a bad effort). The user may also drop a reviewer ("skip codex") or
+   add one not in the default mix.
+2. **Explicit tier** the user named — "fast review" / "deep review" → apply the table above.
+3. **Default** — `deep`.
+
+Each spawn's result header echoes `model=… effort=…` actually used, so verify your override
+landed; carry the resolved model + effort into the synthesis report per reviewer (and flag
+when it came from a user override), so the user can confirm their choice took effect.
+
 ## Independence — who should review
 
 The whole value is *independent* perspectives, so guard two separate biases:
@@ -112,6 +160,7 @@ serializes tool calls still runs them all, just one after another.
 |---|---|
 | `task` | The finder prompt + the embedded diff (see template). |
 | `allow_tools` | **omit it** (false) — keep finders reason-only (step 1 has the per-backend nuance). |
+| `model` / `effort` | per **Model & effort selection** above (default `deep`; honor user overrides). |
 | `timeout_seconds` | 300–600 depending on diff size. |
 | `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
 
@@ -208,8 +257,9 @@ was a single-model review.
 ## Output format
 
 A ranked list (table or JSON), each row: `file:line · SEVERITY · summary ·
-found-by:<model> · verified-by:<model>:<verdict>`. Lead with a one-line note of
-which models participated.
+found-by:<model> · verified-by:<model>:<verdict>`. Lead with a one-line note of which
+models participated and at what tier/effort (and any user overrides) — each spawn's result
+header reports the `model=… effort=…` it actually ran, so report that, not your intent.
 
 ## Using this from Claude Code, Antigravity, or Codex
 

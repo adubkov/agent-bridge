@@ -36,7 +36,7 @@ Spawns a Gemini agent via the Antigravity `agy` CLI.
 | `add_dirs` | string[] | — | Directories to add to the agent's workspace (absolute paths). Repeated as `--add-dir`. |
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
-| `model` | string | CLI default | Optional model; passed as `--model <model>` only when non-empty. |
+| `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
 | `allow_tools` | bool | **false** | Let the agent edit files in `working_dir` / run commands by auto-approving its permission prompts (`--dangerously-skip-permissions`). |
 | `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Gemini-only** — `claude_agent` has no `sandbox` param. |
 
@@ -53,7 +53,8 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 | `add_dirs` | string[] | — | Directories to add to the agent's workspace (absolute paths). Repeated as `--add-dir`. |
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
-| `model` | string | CLI default | Optional model; passed as `--model <model>` only when non-empty. |
+| `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
+| `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
 | `allow_tools` | bool | **false** | Let the agent edit files in `working_dir` / run commands by auto-approving its permission prompts (`--dangerously-skip-permissions`). This is **unattended execution that consumes Claude credits**. |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
@@ -72,7 +73,8 @@ sandbox* and *full, unsandboxed access* rather than off/on.
 | `add_dirs` | string[] | — | Additional writable directories (absolute paths). Repeated as `--add-dir`. |
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Codex `exec` has **no** internal timeout flag; the timeout is enforced purely by the process context deadline. |
-| `model` | string | CLI default | Optional model; passed as `--model <model>` only when non-empty. |
+| `model` | string | provider default | Optional; `--model <model>` when non-empty. **Omit** to use Codex's recommended *frontier* model (most-capable, auto-current). |
+| `effort` | string | model default | Optional reasoning effort; passed as `-c model_reasoning_effort=<level>` when non-empty (e.g. `minimal\|low\|medium\|high`). |
 | `allow_tools` | bool | **false** | **false** → read-only sandbox (`--sandbox read-only`): Codex reads and reasons but cannot edit files or run effectful commands. **true** → passes `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access, edits landing in `working_dir`. |
 
 There is **no `sandbox` param** on `codex_agent` — `allow_tools` already selects
