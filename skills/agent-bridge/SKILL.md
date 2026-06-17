@@ -48,7 +48,7 @@ review/verification of whatever Antigravity produces (always verify its output).
 | `add_dirs` | Extra workspace dirs for context. |
 | `model` | Optional; the CLI default is fine. Pass a name for a specific model (`agy models` lists Gemini's). |
 | `timeout_seconds` | Default 300, max 1800. Raise for big tasks. |
-| `mode` | **`reason`** by default — reason/answer, but **not** a hard write-block: agy has no tool-disable flag and doesn't gate writes, so a `reason` agent with a writable `working_dir` can still edit files unattended (point `working_dir` at a throwaway dir, or omit it, to prevent that — `--sandbox` does **not** confine writes). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). `antigravity_agent` has no `read` tier. |
+| `mode` | **`reason`** by default — reason/answer, but **not** a hard write-block: agy has no tool-disable flag and doesn't gate writes, so a `reason` agent with a writable `working_dir` can still edit files unattended (point `working_dir` at a throwaway dir to prevent that — omitting `working_dir` is **not** a guard, it just runs agy in the bridge server's own cwd, often your project tree; `--sandbox` does **not** confine writes). `mode: "act"` lets it edit files in `working_dir` / run commands (auto-approves permission prompts). `antigravity_agent` has no `read` tier. |
 | `sandbox` | **false by default.** Enables agy's *terminal* restrictions only — despite the name it does **not** confine the agent's file edits (a write under it still lands in `working_dir`, verified), so it is not a "don't touch my files" guard; use a throwaway `working_dir` for that. |
 
 ### Two modes (antigravity)
@@ -57,7 +57,8 @@ review/verification of whatever Antigravity produces (always verify its output).
    second opinions. ⚠️ Not a hard write-block: agy has no tool-disable flag and
    doesn't gate writes, so a `reason` agent pointed at a writable `working_dir` can
    still edit files unattended. For a truly hands-off run, point `working_dir` at a
-   throwaway dir or omit it — `--sandbox` does **not** confine writes.
+   throwaway dir (omitting it just runs agy in the bridge server's own cwd, often your
+   project tree — not a guard); `--sandbox` does **not** confine writes.
 2. **Acting (`mode: "act"`)** — Antigravity edits files /
    runs commands in `working_dir` with its permission gates off. Use for the
    mechanical-edit cases. **Always pass `working_dir` so it's scoped, and verify the

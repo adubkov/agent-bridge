@@ -98,7 +98,8 @@ install-agy: build
 	fi
 	@cfg='$(AGY_PLUGIN_DIR)/mcp_config.json'; \
 	if [ -f "$$cfg" ]; then \
-	  sed 's#$${CLAUDE_PLUGIN_ROOT}/$(BINARY)#$(AGY_PLUGIN_DIR)/$(BINARY)#' "$$cfg" > "$$cfg.tmp" && mv "$$cfg.tmp" "$$cfg" && \
+	  repl=$$(printf '%s' '$(AGY_PLUGIN_DIR)/$(BINARY)' | sed 's/[&\\#]/\\&/g'); \
+	  sed 's#$${CLAUDE_PLUGIN_ROOT}/$(BINARY)#'"$$repl"'#' "$$cfg" > "$$cfg.tmp" && mv "$$cfg.tmp" "$$cfg" && \
 	  echo "repointed agy MCP command -> $(AGY_PLUGIN_DIR)/$(BINARY)"; \
 	else \
 	  echo "WARNING: $$cfg not found; set the MCP command to $(AGY_PLUGIN_DIR)/$(BINARY) manually."; \

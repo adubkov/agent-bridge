@@ -152,7 +152,8 @@ const (
 		"the agent's full output. By default (`mode: \"reason\"`) it runs WITHOUT the permission-bypass flag and is meant " +
 		"to reason/answer — but agy has no tool-disable flag and does NOT gate writes, so a `reason` agent pointed at a " +
 		"writable `working_dir` can still read AND edit files unattended. `--sandbox` is terminal-restrictions only and does " +
-		"NOT keep edits out of `working_dir`, so to keep agy off your files point `working_dir` at a throwaway dir (or omit it). " +
+		"NOT keep edits out of `working_dir`, so to keep agy off your files point `working_dir` at a throwaway dir " +
+		"(omitting `working_dir` is NOT a guard — agy then runs in the bridge server's own cwd, often your project tree). " +
 		"Set `mode: \"act\"` to let it act, which " +
 		"disables agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent " +
 		"has no `read` tier — only `reason` or `act`.) Sandboxing is OFF by default. Use `add_dirs` for workspace context " +
@@ -171,7 +172,7 @@ const (
 
 	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass flag — but agy has no " +
 		"tool-disabling flag and does NOT gate writes, so a `reason` agent with a writable working_dir may still read AND " +
-		"edit files unattended (`--sandbox` does NOT confine these writes — use a throwaway working_dir, or omit it). `act` = edit files in working_dir + run commands " +
+		"edit files unattended (`--sandbox` does NOT confine these writes — use a throwaway working_dir; omitting it just runs agy in the server's own cwd, often your project tree). `act` = edit files in working_dir + run commands " +
 		"UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO read-only tier, so `read` is " +
 		"rejected — use `reason` or `act`."
 
@@ -199,7 +200,7 @@ const (
 
 	sandboxDescription = "Enable agy's sandbox terminal restrictions (--sandbox). Default false. NOTE: despite the name " +
 		"this does NOT confine the agent's FILE edits — a write under --sandbox still lands in working_dir (verified), so it " +
-		"is not a 'don't touch my files' guard. To keep agy off your files, point working_dir at a throwaway dir, or omit it. " +
+		"is not a 'don't touch my files' guard. To keep agy off your files, point working_dir at a throwaway dir (omitting it just runs agy in the server's own cwd, often your project tree — also not a guard). " +
 		"Antigravity-only."
 
 	claudeEffortDescription = "Optional reasoning effort for this run (passed as `--effort`). Accepts low | medium | " +

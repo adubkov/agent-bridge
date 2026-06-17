@@ -40,7 +40,8 @@ paths tail-truncate the merged stream for pty backends (`backend.failureStdout`)
 file write under `sandbox: true` still lands in `working_dir` (verified). agy also has **no
 write-safe tier** (unlike `claude --tools ""` / `codex --sandbox read-only`) and routinely
 saves a scratch `git diff` dump into `working_dir` while reviewing. To keep agy off your
-tree, point `working_dir` at a **throwaway `git worktree`** (or omit it) — not `--sandbox`.
+tree, point `working_dir` at a **throwaway `git worktree`** — not `--sandbox`, and not by
+omitting `working_dir` (that runs agy in the bridge server's own cwd, often your project tree).
 
 **agy latency is highly variable** (~75–270s observed for the same Pro-tier repo review), so
 give agy generous `timeout_seconds` (≥300) rather than reading a slow run as a hang.

@@ -403,12 +403,12 @@ Antigravity host on `claude_agent` + `codex_agent`).
   `AGENT_HOP_DEPTH`, refuses to spawn once it reaches `AGENT_HOP_MAX` (default 2), and
   increments it for each child — bounding any A→B→A chain. (2) Every **non-acting** child —
   `reason` or `read` mode, which is every reviewer in the recommended recipes (claude
-  `read`, codex `read`, agy `reason`+`sandbox`) — is spawned with `AGENT_NO_DELEGATE=1`, and
+  `read`, codex `read`, agy `reason`) — is spawned with `AGENT_NO_DELEGATE=1`, and
   the bridge refuses to spawn from a process carrying that flag, so a reviewer genuinely
   **cannot** delegate further. A round built from those recipes therefore can't nest at all.
   The one way to lose this: agy in `mode: "act"` — an *acting* child gets no freeze and is
-  bounded only by the hop guard, which is exactly why step 1 uses agy `reason`+`sandbox`,
-  not `act`+`sandbox`.
+  bounded only by the hop guard, which is exactly why step 1 uses agy `reason` (no sandbox),
+  not `act`.
 - **Tool behavior is authoritative in the tool descriptions.** This skill summarizes what
   each backend's `mode` (reason/read/act) / `working_dir` / `sandbox` options do, but the
   bridge's own MCP tool descriptions (generated from `cmd/agent-bridge-mcp/main.go`) are
