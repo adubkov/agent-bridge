@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -45,14 +46,32 @@ func runOnPTY(cmd *exec.Cmd) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = ptmx.Close() }()
 
-	// Drain the master until every writer on the slave is gone (child + any
-	// grandchildren exited, or the group was killed on timeout). On Linux that final
-	// read surfaces as EIO and on macOS as EOF; either way io.Copy stops. We discard
-	// that read error — it is the expected end-of-stream, not a failure — and report
-	// only the child's own exit status from Wait.
+	// Drain the master in a goroutine. On a clean exit every writer on the slave goes
+	// away (child + grandchildren exit) and io.Copy returns EOF (macOS) / EIO (Linux);
+	// we discard that read error — it is the expected end-of-stream.
 	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, ptmx)
-	return buf.Bytes(), cmd.Wait()
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, ptmx)
+		close(copyDone)
+	}()
+
+	werr := cmd.Wait()
+
+	// cmd.Wait returns once the child is reaped (on timeout the Cancel above SIGKILLs
+	// the whole group first). Normally the slave then closes and the copy drains the
+	// last buffered bytes and finishes on its own — so wait a short grace period for a
+	// clean EOF (no truncation). But a grandchild that escaped the group (its own
+	// session) could hold the slave open and wedge io.Copy forever; cmd.WaitDelay does
+	// NOT cover this read, since the pty master is not one of exec.Cmd's managed pipes.
+	// So after the grace period, force the copy to unblock by closing the master,
+	// guaranteeing runOnPTY returns even when the deadline alone would not free it.
+	select {
+	case <-copyDone:
+	case <-time.After(childWaitDelay):
+	}
+	_ = ptmx.Close()
+	<-copyDone
+	return buf.Bytes(), werr
 }

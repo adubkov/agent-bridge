@@ -30,9 +30,10 @@
 // --sandbox read-only; antigravity_agent has NO read tier.
 //
 // Scope read/act runs with `working_dir`. For antigravity_agent the `--sandbox` flag is
-// OFF by default because it confines edits to an isolated scratch dir (set
-// `sandbox: true` only for a confined "compute but don't touch my files" run);
-// claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
+// OFF by default; note it applies agy's "terminal restrictions" but does NOT keep file
+// edits out of `working_dir` (verified: a write under --sandbox landed in working_dir), so
+// it is not a "don't touch my files" guard — point `working_dir` at a throwaway dir (or
+// omit it) to keep agy off your files. claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
 // default (`mode: "reason"`/`"read"`) runs it in a read-only sandbox
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
@@ -44,10 +45,11 @@
 // stop a CLI from reading: both `claude --print` and `agy --print` auto-allow read
 // tools. And it does NOT stop agy from WRITING: agy has no tool-disabling flag and
 // does not gate writes behind skip-perms, so a `reason` antigravity_agent pointed at
-// a writable `working_dir` can still edit files unattended — pass `sandbox: true` (or
-// withhold `working_dir`) to confine it. This is why the finder step withholds
-// `working_dir` (a reading backend then sees the server's cwd, not the repo) and why
-// a repo-reading agy review must add `sandbox: true`.
+// a writable `working_dir` can still edit files unattended — and `--sandbox` does NOT
+// confine those edits (it is terminal restrictions only; a write under it still lands in
+// working_dir, verified). The only real guard is WHERE it runs: withhold `working_dir`
+// (a reading backend then sees the server's cwd, not the repo), or point it at a throwaway
+// dir/worktree, to keep agy off your files.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
@@ -148,8 +150,9 @@ const (
 		"task and return its response. Give it a self-contained task in `task`; it runs non-interactively and returns " +
 		"the agent's full output. By default (`mode: \"reason\"`) it runs WITHOUT the permission-bypass flag and is meant " +
 		"to reason/answer — but agy has no tool-disable flag and does NOT gate writes, so a `reason` agent pointed at a " +
-		"writable `working_dir` can still read AND edit files unattended; pass `sandbox: true` to confine any edits to an " +
-		"isolated scratch dir (or omit `working_dir`) to keep it off your files. Set `mode: \"act\"` to let it act, which " +
+		"writable `working_dir` can still read AND edit files unattended. `--sandbox` is terminal-restrictions only and does " +
+		"NOT keep edits out of `working_dir`, so to keep agy off your files point `working_dir` at a throwaway dir (or omit it). " +
+		"Set `mode: \"act\"` to let it act, which " +
 		"disables agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent " +
 		"has no `read` tier — only `reason` or `act`.) Sandboxing is OFF by default. Use `add_dirs` for workspace context " +
 		"and `working_dir` to set where it runs."
@@ -167,7 +170,7 @@ const (
 
 	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass flag — but agy has no " +
 		"tool-disabling flag and does NOT gate writes, so a `reason` agent with a writable working_dir may still read AND " +
-		"edit files unattended; pass `sandbox: true` to confine writes. `act` = edit files in working_dir + run commands " +
+		"edit files unattended (`--sandbox` does NOT confine these writes — use a throwaway working_dir, or omit it). `act` = edit files in working_dir + run commands " +
 		"UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO read-only tier, so `read` is " +
 		"rejected — use `reason` or `act`."
 
@@ -193,9 +196,10 @@ const (
 		"unsandboxed file/command access (passes --dangerously-bypass-approvals-and-sandbox). Use with care; scope it " +
 		"with working_dir."
 
-	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
-		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
-		"confined 'compute but don't touch my files' run."
+	sandboxDescription = "Enable agy's sandbox terminal restrictions (--sandbox). Default false. NOTE: despite the name " +
+		"this does NOT confine the agent's FILE edits — a write under --sandbox still lands in working_dir (verified), so it " +
+		"is not a 'don't touch my files' guard. To keep agy off your files, point working_dir at a throwaway dir, or omit it. " +
+		"Antigravity-only."
 
 	claudeEffortDescription = "Optional reasoning effort for this run (passed as `--effort`). Accepts low | medium | " +
 		"high | xhigh | max. Leave empty for the model's default effort."
@@ -434,8 +438,9 @@ var backends = []backend{
 		needsPTY:        true, // agy's agentic --print hangs without a controlling TTY
 		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
 		// has no tool-disabling flag and does not gate writes behind the bypass flag, so a
-		// reason agent with a writable working_dir can still read AND edit unattended (use
-		// sandbox to confine); reasonOnlyNote states the no-bypass tier honestly.
+		// reason agent with a writable working_dir can still read AND edit unattended (use a
+		// throwaway working_dir to keep it off your files — --sandbox does NOT confine writes);
+		// reasonOnlyNote states the no-bypass tier honestly.
 		reasonOnlyNote: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
 		description:    antigravityToolDescription,
 		modeDesc:       antigravityModeDescription,
@@ -681,11 +686,11 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 				"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode)), nil
 		}
 
-		// sandbox defaults OFF and is antigravity-only. With --sandbox, agy confines
-		// the agent to an isolated scratch dir, so its file edits do NOT land in
-		// working_dir — useless for real project edits. Callers wanting a
-		// confined "compute but don't touch my files" run set sandbox: true
-		// explicitly. claude has no sandbox concept, so the param is not read.
+		// sandbox defaults OFF and is antigravity-only. --sandbox applies agy's
+		// "terminal restrictions" but does NOT confine file edits (a write under it
+		// still lands in working_dir, verified), so it is not a write guard — to keep
+		// agy off your files use a throwaway working_dir. claude has no sandbox
+		// concept, so the param is not read.
 		if b.supportsSandbox() {
 			o.sandbox = req.GetBool("sandbox", false)
 		}
@@ -788,14 +793,14 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if runCtx.Err() == context.DeadlineExceeded {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s timed out after %s (%s).\nPartial stdout:\n%s\nstderr:\n%s",
-			b.tool, elapsed, modeNoteStr, truncate(stdout.String(), 8000), truncateTail(stderr.String(), 2000),
+			b.tool, elapsed, modeNoteStr, b.failureStdout(stdout.String(), 8000), truncateTail(stderr.String(), 2000),
 		)), nil
 	}
 
 	if runErr != nil {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s failed (%s): %v\nstderr:\n%s\nstdout:\n%s",
-			b.tool, modeNoteStr, runErr, truncateTail(stderr.String(), 4000), truncate(stdout.String(), 8000),
+			b.tool, modeNoteStr, runErr, truncateTail(stderr.String(), 4000), b.failureStdout(stdout.String(), 8000),
 		)), nil
 	}
 
@@ -826,6 +831,18 @@ func cleanPTYOutput(b []byte) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "")
 	return s
+}
+
+// failureStdout renders captured stdout for an error/timeout result. For a pty-run
+// backend stdout is the MERGED stdout+stderr stream and the real error (a CLI's crash
+// message, a timeout notice) lands at the TAIL, so keep the tail. Pipe backends carry
+// the error in their separate (already tail-truncated) stderr and stdout holds normal
+// output, so the HEAD is the useful part there.
+func (b backend) failureStdout(s string, limit int) string {
+	if b.needsPTY {
+		return truncateTail(s, limit)
+	}
+	return truncate(s, limit)
 }
 
 // truncate returns a copy of s truncated to at most limit bytes, without

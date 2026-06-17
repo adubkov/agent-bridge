@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestBackendNeedsPTY pins which backends run on a pseudo-terminal. agy's agentic
 // --print hangs on plain pipes, so antigravity MUST be pty-run; claude/codex are
@@ -19,6 +22,18 @@ func TestBackendNeedsPTY(t *testing.T) {
 		if c.b.needsPTY != c.want {
 			t.Errorf("%s needsPTY = %v, want %v", c.b.tool, c.b.needsPTY, c.want)
 		}
+	}
+}
+
+// TestFailureStdout: a pty backend's error/timeout output must keep the TAIL (where a
+// merged-stream error lands); a pipe backend head-truncates (its error is in stderr).
+func TestFailureStdout(t *testing.T) {
+	long := strings.Repeat("A", 100) + "TAIL-ERROR"
+	if got := antigravityBackend.failureStdout(long, 30); !strings.Contains(got, "TAIL-ERROR") {
+		t.Errorf("pty backend must keep the tail error; got %q", got)
+	}
+	if got := codexBackend.failureStdout(long, 30); strings.Contains(got, "TAIL-ERROR") {
+		t.Errorf("pipe backend should head-truncate; unexpectedly kept tail: %q", got)
 	}
 }
 
