@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # mcp_config.json at it. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
+.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). The install-* targets copy this freshly built binary
@@ -34,21 +34,21 @@ vet:
 test:
 	go test ./...
 
-## smoke: build + smoke-test ALL tools (gemini_agent + claude_agent + codex_agent).
+## smoke: build + smoke-test ALL tools (antigravity_agent + claude_agent + codex_agent).
 ##        Needs agy, claude AND codex authed; runs each in a clean temp dir. For one
-##        tool, use the smoke-gemini / smoke-claude / smoke-codex targets.
-smoke: smoke-gemini smoke-claude smoke-codex
-	@echo "smoke OK (gemini + claude + codex)"
+##        tool, use the smoke-antigravity / smoke-claude / smoke-codex targets.
+smoke: smoke-antigravity smoke-claude smoke-codex
+	@echo "smoke OK (antigravity + claude + codex)"
 
 # Map each smoke-<label> target to the MCP tool it exercises.
-TOOL_gemini := gemini_agent
+TOOL_antigravity := antigravity_agent
 TOOL_claude := claude_agent
 TOOL_codex  := codex_agent
 
-## smoke-gemini: smoke-test just gemini_agent (clean temp dir; needs agy authed)
+## smoke-antigravity: smoke-test just antigravity_agent (clean temp dir; needs agy authed)
 ## smoke-claude: smoke-test just claude_agent (clean temp dir; needs claude authed)
 ## smoke-codex: smoke-test just codex_agent (clean temp dir; needs codex authed)
-smoke-gemini smoke-claude smoke-codex: smoke-%: build
+smoke-antigravity smoke-claude smoke-codex: smoke-%: build
 	@mkdir -p /tmp/agent-bridge-mcp-smoke-$*
 	@printf '%s\n' \
 	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
@@ -69,7 +69,7 @@ install-claude: build
 	-claude plugin marketplace remove $(MARKETPLACE)
 	claude plugin marketplace add $(CURDIR)
 	claude plugin install $(PLUGIN)@$(MARKETPLACE)
-	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Claude Code (skills + MCP: gemini_agent + claude_agent + codex_agent, frozen cache copy — from Claude use gemini_agent or codex_agent). Restart Claude Code, then /mcp + /plugin to confirm."
+	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Claude Code (skills + MCP: antigravity_agent + claude_agent + codex_agent, frozen cache copy — from Claude use antigravity_agent or codex_agent). Restart Claude Code, then /mcp + /plugin to confirm."
 
 ## uninstall-claude: remove the plugin and its local marketplace from Claude Code
 uninstall-claude:
@@ -99,7 +99,7 @@ install-agy: build
 	else \
 	  echo "WARNING: $$cfg not found; set the MCP command to $(AGY_PLUGIN_DIR)/$(BINARY) manually."; \
 	fi
-	@echo "installed $(PLUGIN) into agy (skill + MCP: gemini_agent + claude_agent + codex_agent — from agy use claude_agent). Restart Antigravity; 'agy plugin list' to confirm."
+	@echo "installed $(PLUGIN) into agy (skill + MCP: antigravity_agent + claude_agent + codex_agent — from agy use claude_agent). Restart Antigravity; 'agy plugin list' to confirm."
 
 ## uninstall-agy: remove this plugin (and its frozen binary) from the Antigravity `agy` CLI
 uninstall-agy:
@@ -123,7 +123,7 @@ install-codex: build
 	-codex plugin marketplace remove $(MARKETPLACE)
 	codex plugin marketplace add $(CURDIR)
 	codex plugin add $(PLUGIN)@$(MARKETPLACE)
-	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Codex (skill + MCP: gemini_agent + claude_agent + codex_agent, bundled & frozen — from Codex use gemini_agent or claude_agent). Restart Codex, then 'codex plugin list' + 'codex mcp list' to confirm."
+	@echo "installed $(PLUGIN)@$(MARKETPLACE) into Codex (skill + MCP: antigravity_agent + claude_agent + codex_agent, bundled & frozen — from Codex use antigravity_agent or claude_agent). Restart Codex, then 'codex plugin list' + 'codex mcp list' to confirm."
 
 ## uninstall-codex: remove the bridge plugin and its local marketplace from Codex
 uninstall-codex:

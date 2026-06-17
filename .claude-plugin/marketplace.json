@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-bridge-local",
-  "description": "Local marketplace for the agent-bridge plugin — a bidirectional agent bridge exposing gemini_agent, claude_agent, and codex_agent as MCP tools, plus delegation and cross-model code-review skills.",
+  "description": "Local marketplace for the agent-bridge plugin — a bidirectional agent bridge exposing antigravity_agent, claude_agent, and codex_agent as MCP tools, plus delegation and cross-model code-review skills.",
   "owner": {
     "name": "Alexey Dubkov",
     "email": "alexey@dubkov.com"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "agent-bridge",
-      "description": "Bidirectional agent bridge as an MCP server: exposes `gemini_agent` (spawn a Gemini agent via the Antigravity `agy` CLI), `claude_agent` (spawn a Claude agent via the `claude` CLI), and `codex_agent` (spawn an OpenAI Codex agent via the `codex` CLI), plus skills for delegating to Gemini and for running cross-model code reviews.",
+      "description": "Bidirectional agent bridge as an MCP server: exposes `antigravity_agent` (spawn an Antigravity agent — Gemini models — via the `agy` CLI), `claude_agent` (spawn a Claude agent via the `claude` CLI), and `codex_agent` (spawn an OpenAI Codex agent via the `codex` CLI), plus skills for delegating to Antigravity and for running cross-model code reviews.",
       "author": { "name": "Alexey Dubkov" },
       "category": "mcp",
       "source": "./"

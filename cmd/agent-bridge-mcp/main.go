@@ -3,10 +3,10 @@
 //
 // Three tools are registered:
 //
-//   - gemini_agent — shells out to the Antigravity CLI (`agy --print <task>`),
-//     i.e. spawns a Gemini sub-agent. Intended to be called from a Claude session.
+//   - antigravity_agent — shells out to the Antigravity CLI (`agy --print <task>`),
+//     i.e. spawns an Antigravity (Gemini) sub-agent. Intended to be called from a Claude session.
 //   - claude_agent — shells out to the Claude CLI (`claude --print <task>`),
-//     i.e. spawns a Claude sub-agent. Intended to be called from a Gemini session.
+//     i.e. spawns a Claude sub-agent. Intended to be called from an Antigravity session.
 //   - codex_agent — shells out to the OpenAI Codex CLI (`codex exec <task>`),
 //     i.e. spawns a Codex sub-agent. Callable from any parent session.
 //
@@ -21,14 +21,14 @@
 // permission-bypass, so no unattended writes/commands), `read` (read-only
 // exploration), or `act` (full file edits + command execution, unattended). Acting
 // passes a permission-bypass flag:
-//   - gemini_agent passes --dangerously-skip-permissions to `agy`.
+//   - antigravity_agent passes --dangerously-skip-permissions to `agy`.
 //   - claude_agent passes --dangerously-skip-permissions to `claude`.
 //   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
 //
 // Read mode: claude_agent passes --permission-mode plan; codex_agent reuses its
-// --sandbox read-only; gemini_agent has NO read tier.
+// --sandbox read-only; antigravity_agent has NO read tier.
 //
-// Scope read/act runs with `working_dir`. For gemini_agent the `--sandbox` flag is
+// Scope read/act runs with `working_dir`. For antigravity_agent the `--sandbox` flag is
 // OFF by default because it confines edits to an isolated scratch dir (set
 // `sandbox: true` only for a confined "compute but don't touch my files" run);
 // claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
@@ -41,7 +41,7 @@
 // reading: both `claude --print` and `agy --print` auto-allow their read tools. So
 // claude_agent's `reason` additionally passes `--tools ""` to hard-disable ALL
 // built-in tools (a true no-tools run). agy has no tool-disabling flag, so
-// gemini_agent's `reason` can still read; codex_agent's `reason` is the read-only
+// antigravity_agent's `reason` can still read; codex_agent's `reason` is the read-only
 // sandbox above. A reason child may therefore still read the filesystem unless it is
 // claude_agent — which is why the finder step also withholds `working_dir` so a
 // reading backend sees the server's cwd, not the repo under review.
@@ -57,9 +57,10 @@
 // reason or read) is spawned with AGENT_NO_DELEGATE=1 in its environment;
 // any bridge server that child itself launches sees the flag and refuses to
 // spawn — a hard "no further delegation" stop that does not rely on the depth
-// counter. This matters most for codex_agent, whose reason-only mode is a
-// read-only sandbox that can still run read-only commands (and thus could
-// otherwise re-enter the bridge); gemini/claude reason-only have no tools at all.
+// counter. This matters for codex_agent (reason-only is a read-only sandbox that
+// can still run read-only commands) and antigravity_agent (reason-only still has
+// read tools — agy has no tool-disable flag), either of which could otherwise
+// re-enter the bridge; claude_agent reason-only has no tools at all (--tools "").
 package main
 
 import (
@@ -95,11 +96,11 @@ const (
 	// rather than a property of whichever sandbox the backend happens to use.
 	noDelegateEnv = "AGENT_NO_DELEGATE"
 
-	// geminiTimeoutHeadroom is the extra wall-clock allowed beyond the requested
+	// antigravityTimeoutHeadroom is the extra wall-clock allowed beyond the requested
 	// timeout before agy is hard-killed, so agy's own --print-timeout fires first
 	// and surfaces its message. claude has no --print-timeout, so its backend uses
 	// zero headroom (the context deadline IS the timeout).
-	geminiTimeoutHeadroom = 30 * time.Second
+	antigravityTimeoutHeadroom = 30 * time.Second
 
 	// childWaitDelay bounds how long cmd.Run may block on stdout/stderr I/O after
 	// the child is killed, so a grandchild that inherited the pipes cannot hang the
@@ -118,9 +119,9 @@ type runOpts struct {
 	//   reason → both false   read → readOnly   act → allowTools.
 	allowTools bool
 	readOnly   bool
-	sandbox    bool // gemini-only boolean --sandbox; ignored by claude/codex
+	sandbox    bool // antigravity-only boolean --sandbox; ignored by claude/codex
 	model      string
-	effort     string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by gemini
+	effort     string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by antigravity
 	addDirs    []string
 	workingDir string
 }
@@ -128,7 +129,7 @@ type runOpts struct {
 // Access modes — the values of the `mode` param. reason = reason/answer only, no
 // tools (the default); read = read-only exploration (read/grep files, no edits or
 // effectful commands); act = full file edits + command execution (unattended).
-// Per backend: gemini_agent has no `read` tier; codex_agent's reason and read are
+// Per backend: antigravity_agent has no `read` tier; codex_agent's reason and read are
 // both its `--sandbox read-only` (it has no pure no-tools mode).
 const (
 	modeReason = "reason"
@@ -139,12 +140,12 @@ const (
 // Model-facing tool descriptions. The prose differs per backend; the parameter
 // set is shared (see commonToolOptions) so the tool schemas can't drift.
 const (
-	geminiToolDescription = "Spawn a Gemini agent (via the Antigravity `agy` CLI) to perform a task and return its " +
-		"response. Give it a self-contained task in `task`; it runs non-interactively and returns Gemini's full " +
-		"output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT take unattended " +
-		"actions (no file edits / command execution) — set `mode: \"act\"` to let it act, which disables Gemini's " +
-		"permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (gemini_agent has no `read` " +
-		"tier — only `reason` or `act`.) Sandboxing is OFF by default; set " +
+	antigravityToolDescription = "Spawn an Antigravity agent (Google's `agy` CLI, which runs Gemini models) to perform a " +
+		"task and return its response. Give it a self-contained task in `task`; it runs non-interactively and returns " +
+		"the agent's full output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT " +
+		"take unattended actions (no file edits / command execution) — set `mode: \"act\"` to let it act, which disables " +
+		"agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent has no " +
+		"`read` tier — only `reason` or `act`.) Sandboxing is OFF by default; set " +
 		"`sandbox: true` to instead confine edits to an isolated scratch dir. Use `add_dirs` for workspace context " +
 		"and `working_dir` to set where it runs."
 
@@ -158,9 +159,9 @@ const (
 		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
 		"(low|medium|high|xhigh|max) to control reasoning effort. Note: even reason-only runs consume Claude credits."
 
-	geminiModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass, so no unattended file " +
+	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass, so no unattended file " +
 		"edits / commands — but agy has no tool-disabling flag, so the agent may still use read tools. `act` = edit " +
-		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). gemini_agent has NO " +
+		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO " +
 		"read-only tier, so `read` is rejected — use `reason` or `act`."
 
 	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
@@ -200,7 +201,7 @@ const (
 // coding-agent is a single registry entry (see the registry below), not new code.
 // Optional flags (timeoutFlag, sandboxFlag) are "" when the CLI lacks them.
 type backend struct {
-	tool    string // MCP tool name, e.g. "gemini_agent"
+	tool    string // MCP tool name, e.g. "antigravity_agent"
 	cliName string // CLI binary name, e.g. "agy"; used for PATH/fallback lookup and the "(<cli> returned no stdout)" note
 	binEnv  string // env override for the CLI path, e.g. "AGY_BIN"
 
@@ -208,22 +209,22 @@ type backend struct {
 	// (e.g. ["exec"] for codex). nil for CLIs invoked as `<bin> [flags] <prompt>`.
 	subcmd []string
 
-	// Flag names. For flag-style CLIs (gemini/claude) promptFlag carries the task
+	// Flag names. For flag-style CLIs (antigravity/claude) promptFlag carries the task
 	// as its VALUE and is emitted FIRST; every other flag follows. "" means the CLI
 	// does not support that flag. When promptPositional is set the task is a
 	// trailing positional argument instead and promptFlag is unused.
 	promptFlag    string // "--print" (flag-style) | "" (positional, see promptPositional)
-	timeoutFlag   string // "--print-timeout" (gemini) | "" (claude/codex: ctx deadline only)
+	timeoutFlag   string // "--print-timeout" (antigravity) | "" (claude/codex: ctx deadline only)
 	modelFlag     string // "--model"
-	effortFlag    string // "--effort" (claude) | "" (codex uses effortConfigKey; gemini has no effort lever)
+	effortFlag    string // "--effort" (claude) | "" (codex uses effortConfigKey; antigravity has no effort lever)
 	addDirFlag    string // "--add-dir"
-	skipPermsFlag string // "--dangerously-skip-permissions" (gemini/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
-	sandboxFlag   string // "--sandbox" (gemini boolean) | "" (claude/codex)
+	skipPermsFlag string // "--dangerously-skip-permissions" (antigravity/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
+	sandboxFlag   string // "--sandbox" (antigravity boolean) | "" (claude/codex)
 
 	// effortConfigKey carries reasoning effort via codex's `-c <key>=<value>` config
 	// form (effortConfigKey = "model_reasoning_effort") when the CLI has no dedicated
 	// effort FLAG. "" for backends that use effortFlag (claude) or have no effort lever
-	// (gemini, where effort is selected through the model name instead).
+	// (antigravity, where effort is selected through the model name instead).
 	effortConfigKey string
 
 	// promptPositional makes the task a trailing positional argument (emitted LAST,
@@ -239,14 +240,14 @@ type backend struct {
 	// CLI needs to stay safe in the no-bypass tier. codex uses ["--sandbox",
 	// "read-only"] (it has no true no-tools mode); claude uses ["--tools", ""] to
 	// HARD-DISABLE all built-in tools, because omitting the skip-perms flag alone does
-	// NOT stop `claude --print` from reading (its read tools are auto-allowed). gemini
+	// NOT stop `claude --print` from reading (its read tools are auto-allowed). antigravity
 	// leaves this nil: agy has no tool-disabling flag, so its reason tier can still
 	// read — see reasonOnlyNote.
 	reasonOnlyArgs []string
 
 	// readOnlyArgs are appended in `read` mode — the flags that grant read-only
 	// exploration (claude: ["--permission-mode", "plan"]; codex: ["--sandbox",
-	// "read-only"]). nil means the backend has no read-only tier (gemini), so `read`
+	// "read-only"]). nil means the backend has no read-only tier (antigravity), so `read`
 	// is rejected for it. supportsReadOnly() reports presence.
 	readOnlyArgs []string
 
@@ -257,7 +258,7 @@ type backend struct {
 
 	// timeoutHeadroom is extra wall-clock added to the requested timeout before the
 	// child is hard-killed. Non-zero only for CLIs with their own internal timeout
-	// (gemini/agy); zero for claude/codex (the context deadline is the timeout).
+	// (antigravity/agy); zero for claude/codex (the context deadline is the timeout).
 	timeoutHeadroom time.Duration
 
 	description string // model-facing tool description
@@ -269,11 +270,11 @@ type backend struct {
 func (b backend) supportsSandbox() bool { return b.sandboxFlag != "" }
 
 // supportsReadOnly reports whether the backend has a `read` (read-only) tier.
-// gemini has none (only no-tools or full), so `mode: "read"` is rejected for it.
+// antigravity has none (only no-tools or full), so `mode: "read"` is rejected for it.
 func (b backend) supportsReadOnly() bool { return len(b.readOnlyArgs) > 0 }
 
 // appliesEffort reports whether the backend exposes a reasoning-effort lever (a
-// dedicated flag or codex's config-key form). gemini has none — its effort lives in
+// dedicated flag or codex's config-key form). antigravity has none — its effort lives in
 // the model name — so its tool omits the effort param and ignores any value passed.
 func (b backend) appliesEffort() bool { return b.effortFlag != "" || b.effortConfigKey != "" }
 
@@ -316,7 +317,7 @@ func (b backend) buildArgs(o runOpts) []string {
 		args = append(args, b.modelFlag, o.model)
 	}
 	// Reasoning effort: a dedicated flag (claude --effort) or codex's config-key form
-	// (-c model_reasoning_effort=<value>). gemini has neither, so its effort is dropped
+	// (-c model_reasoning_effort=<value>). antigravity has neither, so its effort is dropped
 	// here (it is selected through the model name instead).
 	if strings.TrimSpace(o.effort) != "" {
 		switch {
@@ -341,7 +342,7 @@ func (b backend) buildArgs(o runOpts) []string {
 	// Restraint args for the non-acting tiers: `read` mode emits readOnlyArgs
 	// (claude --permission-mode plan / codex --sandbox read-only); the default
 	// `reason` mode emits reasonOnlyArgs (codex's read-only sandbox; claude's
-	// --tools "" no-tools lock; gemini none — agy has no tool-disabling flag). The
+	// --tools "" no-tools lock; antigravity none — agy has no tool-disabling flag). The
 	// act tier emitted its skip-perms flag above and adds neither.
 	switch {
 	case o.allowTools:
@@ -405,7 +406,7 @@ func (b backend) selectionNote(o runOpts) string {
 // new entry can never be silently forgotten.
 var backends = []backend{
 	{
-		tool:            "gemini_agent",
+		tool:            "antigravity_agent",
 		cliName:         "agy",
 		binEnv:          "AGY_BIN",
 		promptFlag:      "--print",
@@ -414,13 +415,13 @@ var backends = []backend{
 		addDirFlag:      "--add-dir",
 		skipPermsFlag:   "--dangerously-skip-permissions",
 		sandboxFlag:     "--sandbox",
-		timeoutHeadroom: geminiTimeoutHeadroom,
-		// no readOnlyArgs — gemini has no read-only tier (only reason or act). agy also
+		timeoutHeadroom: antigravityTimeoutHeadroom,
+		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
 		// has no tool-disabling flag, so reason omits the bypass flag (no unattended
 		// writes) but its read tools stay available; reasonOnlyNote says so honestly.
 		reasonOnlyNote: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
-		description:    geminiToolDescription,
-		modeDesc:       geminiModeDescription,
+		description:    antigravityToolDescription,
+		modeDesc:       antigravityModeDescription,
 	},
 	{
 		tool:          "claude_agent",
@@ -469,9 +470,9 @@ var backends = []backend{
 // Named references into the registry, for tests. Derived from backends so they
 // can't drift from what the server actually registers.
 var (
-	geminiBackend = backends[0]
-	claudeBackend = backends[1]
-	codexBackend  = backends[2]
+	antigravityBackend = backends[0]
+	claudeBackend      = backends[1]
+	codexBackend       = backends[2]
 )
 
 // parseHopEnv reads the current delegation depth and max from a getenv-style
@@ -563,7 +564,7 @@ func main() {
 
 // commonToolOptions returns the tool options shared by every tool: the given
 // description plus the task/add_dirs/working_dir/timeout_seconds/model/mode params.
-// Per-tool extras (e.g. gemini's sandbox, the effort param) are appended by the
+// Per-tool extras (e.g. antigravity's sandbox, the effort param) are appended by the
 // caller. Defining the shared params once keeps the tool schemas from drifting.
 func commonToolOptions(description, modeDescription string) []mcp.ToolOption {
 	return []mcp.ToolOption{
@@ -641,7 +642,7 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 
 		// Resolve the access tier from the `mode` enum (reason | read | act); an
 		// omitted/blank mode means reason. `read` is rejected for backends with no
-		// read-only tier (gemini).
+		// read-only tier (antigravity).
 		mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "")))
 		if mode == "" {
 			mode = modeReason
@@ -663,7 +664,7 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 				"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode)), nil
 		}
 
-		// sandbox defaults OFF and is gemini-only. With --sandbox, agy confines
+		// sandbox defaults OFF and is antigravity-only. With --sandbox, agy confines
 		// the agent to an isolated scratch dir, so its file edits do NOT land in
 		// working_dir — useless for real project edits. Callers wanting a
 		// confined "compute but don't touch my files" run set sandbox: true
@@ -686,7 +687,7 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 // timeout/context handling, truncation, and header formatting. Tool-level
 // failures (timeout, child error, hop limit) are encoded as MCP error results
 // with a nil Go error; only parent-context cancellation returns a Go error,
-// mirroring the original gemini_agent behavior.
+// mirroring the original antigravity_agent behavior.
 func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, error) {
 	// Reason-only freeze: a reason-only parent set AGENT_NO_DELEGATE, so this
 	// agent may not spawn any child (it should only reason, not act). Independent
@@ -714,7 +715,7 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	args := b.buildArgs(o)
 	modeNoteStr := b.modeNote(o)
 
-	// Give backends with their own internal timeout (gemini/agy) a little headroom
+	// Give backends with their own internal timeout (antigravity/agy) a little headroom
 	// beyond the requested timeout so they surface their own timeout message rather
 	// than us killing them first. claude has no internal timeout (headroom 0), so
 	// the context deadline IS the timeout. Guard against a negative timeout (a
@@ -752,7 +753,7 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	// If the parent context was canceled, return the cancellation error
-	// (mirrors the original gemini_agent behavior: a Go error, not a result).
+	// (mirrors the original antigravity_agent behavior: a Go error, not a result).
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

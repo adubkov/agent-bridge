@@ -242,7 +242,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	}
 }
 
-func TestBuildGeminiArgs(t *testing.T) {
+func TestBuildAntigravityArgs(t *testing.T) {
 	tests := []struct {
 		name string
 		in   runOpts
@@ -279,12 +279,12 @@ func TestBuildGeminiArgs(t *testing.T) {
 			want: []string{"--print", "compute", "--print-timeout", "300s", "--sandbox"},
 		},
 		{
-			name: "effort is ignored for gemini (no --effort, no -c; effort is in the model name)",
+			name: "effort is ignored for antigravity (no --effort, no -c; effort is in the model name)",
 			in:   runOpts{task: "x", timeoutSeconds: 300, effort: "high"},
 			want: []string{"--print", "x", "--print-timeout", "300s"},
 		},
 		{
-			name: "read mode is a no-op for gemini (no readOnlyArgs; handler rejects it earlier)",
+			name: "read mode is a no-op for antigravity (no readOnlyArgs; handler rejects it earlier)",
 			in:   runOpts{task: "x", timeoutSeconds: 300, readOnly: true},
 			want: []string{"--print", "x", "--print-timeout", "300s"},
 		},
@@ -311,14 +311,14 @@ func TestBuildGeminiArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := geminiBackend.buildArgs(tt.in)
+			got := antigravityBackend.buildArgs(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("geminiBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
+				t.Errorf("antigravityBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
 			// --print must be first and the task its immediate value (so --print-timeout
 			// never lands between --print and the task).
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
-				t.Errorf("geminiBackend.buildArgs must start with --print <task>; got %#v", got)
+				t.Errorf("antigravityBackend.buildArgs must start with --print <task>; got %#v", got)
 			}
 		})
 	}
@@ -626,7 +626,7 @@ func TestRunAgentNoDelegateRefuses(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 	t.Setenv(noDelegateEnv, "1")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// resolveBin points at a path that would fail loudly if ever executed.
 			tb := withBin(t, base, "/nonexistent/should-not-run")
@@ -653,7 +653,7 @@ func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
 	// The fake echoes the flag it actually received in its environment.
 	bin := writeFakeBin(t, "#!/bin/sh\necho \"ND=[$"+noDelegateEnv+"]\"\n")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			tb := withBin(t, base, bin)
 
@@ -685,7 +685,7 @@ func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 	// ~6.9 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
 	bin := writeFakeBin(t, "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxx\\n' 1>&2; i=$((i+1)); done\nprintf 'REAL-ERROR-AT-END\\n' 1>&2\nexit 1\n")
-	tb := withBin(t, geminiBackend, bin)
+	tb := withBin(t, antigravityBackend, bin)
 
 	res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
 	if err != nil {
@@ -706,15 +706,15 @@ func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
 func TestResolveBinAgyEnvOverride(t *testing.T) {
 	// AGY_BIN override takes top priority and is reachable without network.
 	t.Setenv("AGY_BIN", "/custom/path/to/agy")
-	if got := geminiBackend.resolveBin(); got != "/custom/path/to/agy" {
-		t.Errorf("geminiBackend.resolveBin() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
+	if got := antigravityBackend.resolveBin(); got != "/custom/path/to/agy" {
+		t.Errorf("antigravityBackend.resolveBin() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
 	}
 
 	// Whitespace-only override is treated as unset (falls through to lookup/fallback,
 	// which must never be the override value).
 	t.Setenv("AGY_BIN", "   ")
-	if got := geminiBackend.resolveBin(); got == "   " {
-		t.Errorf("geminiBackend.resolveBin() treated whitespace AGY_BIN as a path: %q", got)
+	if got := antigravityBackend.resolveBin(); got == "   " {
+		t.Errorf("antigravityBackend.resolveBin() treated whitespace AGY_BIN as a path: %q", got)
 	}
 }
 
@@ -756,20 +756,20 @@ func TestModeNotes(t *testing.T) {
 		want string
 	}{
 		{
-			name: "gemini reason-only reports read tools remain (agy has no no-tools flag)",
-			b:    geminiBackend,
+			name: "antigravity reason-only reports read tools remain (agy has no no-tools flag)",
+			b:    antigravityBackend,
 			in:   runOpts{},
 			want: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
 		},
 		{
-			name: "gemini allow_tools without sandbox",
-			b:    geminiBackend,
+			name: "antigravity allow_tools without sandbox",
+			b:    antigravityBackend,
 			in:   runOpts{allowTools: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions)",
 		},
 		{
-			name: "gemini allow_tools with sandbox",
-			b:    geminiBackend,
+			name: "antigravity allow_tools with sandbox",
+			b:    antigravityBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions) in --sandbox",
 		},
@@ -824,7 +824,7 @@ func TestModeNotes(t *testing.T) {
 //
 // runAgent is the shared run path for both tools. These tests inject a fake
 // executable via the backend's real binEnv override (see withBin) and drive the
-// real gemini/claude backends end-to-end — no actual agy/claude CLI is spawned.
+// real antigravity/claude backends end-to-end — no actual agy/claude CLI is spawned.
 
 // writeFakeBin writes an executable shell script to a temp dir and returns its path.
 func writeFakeBin(t *testing.T, script string) string {
@@ -862,7 +862,7 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 func TestRunAgentHopLimit(t *testing.T) {
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// depth == max => the guard must refuse before any spawn.
 			t.Setenv(hopDepthEnv, "2")
@@ -952,7 +952,7 @@ func TestRunAgentOutcomes(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			t.Run(tt.name+"/"+base.tool, func(t *testing.T) {
 				tb := withBin(t, base, writeFakeBin(t, tt.script))
 				res, err := runAgent(context.Background(), tb, runOpts{task: "do it", timeoutSeconds: 300})
@@ -968,7 +968,7 @@ func TestRunAgentParentCancel(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// `exec` so the killed process IS the sleep (no orphaned grandchild
 			// holding the stdout pipe open past the cancellation).
@@ -994,7 +994,7 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
 			// Shrink the per-backend headroom (no global mutation) so the hard
@@ -1026,7 +1026,7 @@ func TestRunAgentKillsGrandchild(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 
 	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
-	tb := withBin(t, geminiBackend, bin)
+	tb := withBin(t, antigravityBackend, bin)
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 
 	type out struct {
@@ -1112,7 +1112,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	}
 
 	t.Run("empty/whitespace task is rejected before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			res, err := call(t, b, map[string]any{"task": "   "})
 			if err != nil {
 				t.Fatalf("[%s] unexpected Go error: %v", b.tool, err)
@@ -1126,7 +1126,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("timeout defaults and clamps (gemini --print-timeout)", func(t *testing.T) {
+	t.Run("timeout defaults and clamps (antigravity --print-timeout)", func(t *testing.T) {
 		cases := []struct {
 			name string
 			args map[string]any
@@ -1139,17 +1139,17 @@ func TestMakeHandlerParsing(t *testing.T) {
 			{"in range -> kept", map[string]any{"task": "x", "timeout_seconds": 600}, "600s"},
 		}
 		for _, c := range cases {
-			res, _ := call(t, geminiBackend, c.args)
+			res, _ := call(t, antigravityBackend, c.args)
 			if a := handlerEchoArgs(t, res); !argsHave(a, "--print-timeout", c.want) {
 				t.Errorf("%s: want --print-timeout %s; args=%v", c.name, c.want, a)
 			}
 		}
 	})
 
-	t.Run("sandbox gated to gemini only", func(t *testing.T) {
-		res, _ := call(t, geminiBackend, map[string]any{"task": "x", "sandbox": true})
+	t.Run("sandbox gated to antigravity only", func(t *testing.T) {
+		res, _ := call(t, antigravityBackend, map[string]any{"task": "x", "sandbox": true})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--sandbox") {
-			t.Errorf("gemini should pass --sandbox; args=%v", a)
+			t.Errorf("antigravity should pass --sandbox; args=%v", a)
 		}
 		// claude has no sandboxFlag, so b.supportsSandbox() is false and it's never read.
 		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "sandbox": true})
@@ -1159,7 +1159,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("add_dirs trimmed and empties dropped", func(t *testing.T) {
-		res, _ := call(t, geminiBackend, map[string]any{
+		res, _ := call(t, antigravityBackend, map[string]any{
 			"task":     "x",
 			"add_dirs": []any{"/a", "  ", "", " /b "},
 		})
@@ -1204,10 +1204,10 @@ func TestMakeHandlerParsing(t *testing.T) {
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("mode should be case-insensitive; args=%v", a)
 		}
-		// read on gemini → rejected (no read-only tier)
-		res, _ = call(t, geminiBackend, map[string]any{"task": "x", "mode": "read"})
+		// read on antigravity → rejected (no read-only tier)
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read"})
 		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
-			t.Errorf("gemini mode=read should be rejected; got %q", resultText(t, res))
+			t.Errorf("antigravity mode=read should be rejected; got %q", resultText(t, res))
 		}
 		// invalid mode → rejected
 		res, _ = call(t, codexBackend, map[string]any{"task": "x", "mode": "bogus"})
@@ -1216,7 +1216,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("effort: claude --effort, codex -c model_reasoning_effort, gemini ignores", func(t *testing.T) {
+	t.Run("effort: claude --effort, codex -c model_reasoning_effort, antigravity ignores", func(t *testing.T) {
 		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "effort": "xhigh"})
 		if a := handlerEchoArgs(t, res); !argsHave(a, "--effort", "xhigh") {
 			t.Errorf("claude should pass --effort xhigh; args=%v", a)
@@ -1225,9 +1225,9 @@ func TestMakeHandlerParsing(t *testing.T) {
 		if a := handlerEchoArgs(t, res); !argsHave(a, "-c", "model_reasoning_effort=high") {
 			t.Errorf("codex should pass -c model_reasoning_effort=high; args=%v", a)
 		}
-		res, _ = call(t, geminiBackend, map[string]any{"task": "x", "effort": "high"})
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "effort": "high"})
 		if a := handlerEchoArgs(t, res); argsContain(a, "--effort") || argsContain(a, "model_reasoning_effort=high") {
-			t.Errorf("gemini must ignore effort (no lever); args=%v", a)
+			t.Errorf("antigravity must ignore effort (no lever); args=%v", a)
 		}
 	})
 
@@ -1235,9 +1235,9 @@ func TestMakeHandlerParsing(t *testing.T) {
 		dir := t.TempDir()
 		// The fake writes a marker into its cwd; if working_dir applied, it lands in dir.
 		marker := writeFakeBin(t, "#!/bin/sh\ntouch cwd-marker\n")
-		h := makeHandler(withBin(t, geminiBackend, marker))
+		h := makeHandler(withBin(t, antigravityBackend, marker))
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{
-			Name:      geminiBackend.tool,
+			Name:      antigravityBackend.tool,
 			Arguments: map[string]any{"task": "x", "working_dir": dir},
 		}}
 		if _, err := h(context.Background(), req); err != nil {
@@ -1249,7 +1249,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("cancelled context returns a Go error before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			h := makeHandler(withBin(t, b, echo))
@@ -1281,7 +1281,7 @@ func writeExec(t *testing.T, dir, name string) string {
 }
 
 func TestResolveBinaryFallbacks(t *testing.T) {
-	for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(b.cliName, func(t *testing.T) {
 			t.Run("found on PATH via LookPath", func(t *testing.T) {
 				t.Setenv(b.binEnv, "")
@@ -1316,12 +1316,12 @@ func TestResolveBinaryFallbacks(t *testing.T) {
 	}
 }
 
-// TestBackendTimeoutHeadroom asserts the per-backend headroom: gemini (which has
+// TestBackendTimeoutHeadroom asserts the per-backend headroom: antigravity (which has
 // its own --print-timeout) gets headroom; claude (no internal timeout) gets none,
 // so its context deadline equals the requested timeout.
 func TestBackendTimeoutHeadroom(t *testing.T) {
-	if geminiBackend.timeoutHeadroom != geminiTimeoutHeadroom {
-		t.Errorf("geminiBackend.timeoutHeadroom = %v; want %v", geminiBackend.timeoutHeadroom, geminiTimeoutHeadroom)
+	if antigravityBackend.timeoutHeadroom != antigravityTimeoutHeadroom {
+		t.Errorf("antigravityBackend.timeoutHeadroom = %v; want %v", antigravityBackend.timeoutHeadroom, antigravityTimeoutHeadroom)
 	}
 	if claudeBackend.timeoutHeadroom != 0 {
 		t.Errorf("claudeBackend.timeoutHeadroom = %v; want 0 (no --print-timeout)", claudeBackend.timeoutHeadroom)
@@ -1332,15 +1332,15 @@ func TestBackendTimeoutHeadroom(t *testing.T) {
 }
 
 // TestToolSchemas verifies the deduped tool builders produce correct, accurate
-// schemas: both expose the shared params; only gemini exposes `sandbox`; and the
-// gemini description does NOT claim acting mode is sandboxed by default.
+// schemas: both expose the shared params; only antigravity exposes `sandbox`; and the
+// antigravity description does NOT claim acting mode is sandboxed by default.
 func TestToolSchemas(t *testing.T) {
-	gemini := newTool(geminiBackend)
+	antigravity := newTool(antigravityBackend)
 	claude := newTool(claudeBackend)
 	codex := newTool(codexBackend)
 
-	if gemini.Name != "gemini_agent" {
-		t.Errorf("gemini tool name = %q; want gemini_agent", gemini.Name)
+	if antigravity.Name != "antigravity_agent" {
+		t.Errorf("antigravity tool name = %q; want antigravity_agent", antigravity.Name)
 	}
 	if claude.Name != "claude_agent" {
 		t.Errorf("claude tool name = %q; want claude_agent", claude.Name)
@@ -1351,8 +1351,8 @@ func TestToolSchemas(t *testing.T) {
 
 	// Shared params present on all three.
 	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "mode"} {
-		if _, ok := gemini.InputSchema.Properties[p]; !ok {
-			t.Errorf("gemini tool missing shared param %q", p)
+		if _, ok := antigravity.InputSchema.Properties[p]; !ok {
+			t.Errorf("antigravity tool missing shared param %q", p)
 		}
 		if _, ok := claude.InputSchema.Properties[p]; !ok {
 			t.Errorf("claude tool missing shared param %q", p)
@@ -1362,9 +1362,9 @@ func TestToolSchemas(t *testing.T) {
 		}
 	}
 
-	// sandbox is gemini-only; claude and codex must NOT expose it.
-	if _, ok := gemini.InputSchema.Properties["sandbox"]; !ok {
-		t.Error("gemini tool should expose the sandbox param")
+	// sandbox is antigravity-only; claude and codex must NOT expose it.
+	if _, ok := antigravity.InputSchema.Properties["sandbox"]; !ok {
+		t.Error("antigravity tool should expose the sandbox param")
 	}
 	if _, ok := claude.InputSchema.Properties["sandbox"]; ok {
 		t.Error("claude tool must NOT expose a sandbox param")
@@ -1373,7 +1373,7 @@ func TestToolSchemas(t *testing.T) {
 		t.Error("codex tool must NOT expose a sandbox param")
 	}
 
-	// effort is claude/codex-only; gemini selects effort via the model name, so it
+	// effort is claude/codex-only; antigravity selects effort via the model name, so it
 	// must NOT expose an effort param.
 	if _, ok := claude.InputSchema.Properties["effort"]; !ok {
 		t.Error("claude tool should expose the effort param")
@@ -1381,17 +1381,17 @@ func TestToolSchemas(t *testing.T) {
 	if _, ok := codex.InputSchema.Properties["effort"]; !ok {
 		t.Error("codex tool should expose the effort param")
 	}
-	if _, ok := gemini.InputSchema.Properties["effort"]; ok {
-		t.Error("gemini tool must NOT expose an effort param")
+	if _, ok := antigravity.InputSchema.Properties["effort"]; ok {
+		t.Error("antigravity tool must NOT expose an effort param")
 	}
 
-	// The gemini description must not claim sandbox-by-default (the bug this fixes),
+	// The antigravity description must not claim sandbox-by-default (the bug this fixes),
 	// and should state sandboxing is off by default.
-	if strings.Contains(gemini.Description, "by default) runs it in a restricted sandbox") {
-		t.Errorf("gemini description still claims default sandbox: %q", gemini.Description)
+	if strings.Contains(antigravity.Description, "by default) runs it in a restricted sandbox") {
+		t.Errorf("antigravity description still claims default sandbox: %q", antigravity.Description)
 	}
-	if !strings.Contains(gemini.Description, "OFF by default") {
-		t.Errorf("gemini description should state sandboxing is OFF by default: %q", gemini.Description)
+	if !strings.Contains(antigravity.Description, "OFF by default") {
+		t.Errorf("antigravity description should state sandboxing is OFF by default: %q", antigravity.Description)
 	}
 
 	// The codex description must convey that its default (mode reason/read) is a
@@ -1467,10 +1467,10 @@ func TestBackendRegistry(t *testing.T) {
 }
 
 func TestSupportsReadOnly(t *testing.T) {
-	// gemini has only no-tools or full; claude (plan mode) and codex (read-only
+	// antigravity has only no-tools or full; claude (plan mode) and codex (read-only
 	// sandbox) have a read tier. This locks the per-backend `read` capability.
-	if geminiBackend.supportsReadOnly() {
-		t.Error("gemini_agent must NOT advertise a read-only tier")
+	if antigravityBackend.supportsReadOnly() {
+		t.Error("antigravity_agent must NOT advertise a read-only tier")
 	}
 	if !claudeBackend.supportsReadOnly() {
 		t.Error("claude_agent should have a read-only tier (--permission-mode plan)")
@@ -1487,8 +1487,8 @@ func TestSelectionNote(t *testing.T) {
 		o    runOpts
 		want string
 	}{
-		{"gemini default", geminiBackend, runOpts{}, "model=default"},
-		{"gemini ignores effort (no lever)", geminiBackend, runOpts{effort: "high"}, "model=default"},
+		{"antigravity default", antigravityBackend, runOpts{}, "model=default"},
+		{"antigravity ignores effort (no lever)", antigravityBackend, runOpts{effort: "high"}, "model=default"},
 		{"claude model + effort", claudeBackend, runOpts{model: "opus", effort: "xhigh"}, "model=opus effort=xhigh"},
 		{"claude model only", claudeBackend, runOpts{model: "sonnet"}, "model=sonnet"},
 		{"codex default model + effort", codexBackend, runOpts{effort: "high"}, "model=default effort=high"},

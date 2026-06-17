@@ -1,6 +1,6 @@
 ---
 name: multi-model-review
-description: Use when the user wants a CROSS-MODEL / multi-model code review of a diff — fan the change out to several different models (Gemini, Claude, Codex) as independent reviewers via the agent-bridge MCP tools, then cross-verify each finding with a DIFFERENT model before reporting. Good for high-stakes diffs where you want uncorrelated model perspectives, not just one model's opinion. Host-agnostic — the orchestrator can be a Claude Code, Antigravity (Gemini), or Codex session. Requires the agent-bridge MCP server (tools `gemini_agent` / `claude_agent` / `codex_agent`).
+description: Use when the user wants a CROSS-MODEL / multi-model code review of a diff — fan the change out to several different models (Gemini, Claude, Codex) as independent reviewers via the agent-bridge MCP tools, then cross-verify each finding with a DIFFERENT model before reporting. Good for high-stakes diffs where you want uncorrelated model perspectives, not just one model's opinion. Host-agnostic — the orchestrator can be a Claude Code, Antigravity (Gemini), or Codex session. Requires the agent-bridge MCP server (tools `antigravity_agent` / `claude_agent` / `codex_agent`).
 ---
 
 # Multi-model code review (via agent-bridge)
@@ -29,7 +29,7 @@ setup.
 ## Prerequisites
 
 - The agent-bridge MCP server is connected in your host. Check which of
-  `gemini_agent`, `claude_agent`, `codex_agent` are actually available (and their
+  `antigravity_agent`, `claude_agent`, `codex_agent` are actually available (and their
   CLIs authed).
 - **Use whichever subset is connected.** With all three you get full cross-family
   diversity; with two it still works; with one this degrades to a single-model
@@ -48,7 +48,7 @@ compose.)
 
 ### Default tiers — drive selection from a tier, default `deep`
 
-| Tier | `claude_agent` | `codex_agent` | `gemini_agent` |
+| Tier | `claude_agent` | `codex_agent` | `antigravity_agent` |
 |---|---|---|---|
 | **deep** (default) | `model: opus`, `effort: xhigh` | `model:` *(omit)*, `effort: high` | `model:` discovered `*Pro* (High)` |
 | **fast** | `model: sonnet`, `effort: medium` | `model:` *(omit)*, `effort: low` | `model:` discovered `*Flash* (Medium)` |
@@ -100,7 +100,7 @@ The whole value is *independent* perspectives, so guard two separate biases:
 
 Independence ladder, best → worst reviewer:
 
-1. **Different family, fresh context** (e.g. `gemini_agent` / `codex_agent` from a
+1. **Different family, fresh context** (e.g. `antigravity_agent` / `codex_agent` from a
    Claude host) — removes *both* biases.
 2. **Same family, fresh context** (e.g. `claude_agent` from a Claude host) — removes
    author bias; still shares model blind spots. A useful supplement, not a
@@ -145,7 +145,7 @@ state-changing commands** is leaving `mode` at its default `reason` (with `codex
 falling back to a `--sandbox read-only` mode). (Per-backend nuance on *reads*, as spawned
 by the finder step — reason-only, no `working_dir`/`add_dirs`: `claude_agent` reason-only
 hard-disables all tools (`--tools ""`), so it genuinely has nothing but the inline diff.
-`gemini_agent` reason-only blocks unattended writes/commands but agy still allows read
+`antigravity_agent` reason-only blocks unattended writes/commands but agy still allows read
 tools — so what keeps it to the diff is that nothing wires the repo in: with no
 `working_dir` it sees the bridge's own cwd, not the repo. `codex_agent` reason-only is a
 `--sandbox read-only` mode that technically *could* read the repo, but you still
@@ -192,7 +192,7 @@ serializes tool calls still runs them all, just one after another.
 
 > **Keep `codex_agent` scoped.** Its reason-only mode is an *agentic* `--sandbox read-only`
 > run, not a no-tools mode. (Of the diff-only backends, only `claude_agent` reason-only is
-> truly no-tools — it passes `--tools ""` and genuinely cannot read; `gemini_agent`
+> truly no-tools — it passes `--tools ""` and genuinely cannot read; `antigravity_agent`
 > reason-only can *also* read, because agy has no tool-disable flag, and is kept to the diff
 > only by withholding `working_dir`.) For codex: if you set `working_dir`/`add_dirs` or tell
 > it to "consult the repo," it will read files and can wander a large tree — slow, and it can
@@ -255,7 +255,7 @@ Keep **CONFIRMED** and **PLAUSIBLE**; drop **REFUTED**. (Prototype: one cross-vo
 per finding. For higher confidence, send to BOTH other models and require a
 majority — note the extra cost.)
 
-**Diff-scoped reviewers.** `gemini_agent` / `claude_agent` finders and verifiers see
+**Diff-scoped reviewers.** `antigravity_agent` / `claude_agent` finders and verifiers see
 only the inline diff, so they can't check call sites or guards that live outside it.
 Read the templates' "broken call sites" and "guarded elsewhere (quote the guard)" as
 scoped to what the diff shows: a diff-only verifier that can't find a guard should
@@ -307,7 +307,7 @@ header reports the `model=… effort=…` it actually ran, so report that, not y
 The bridge tools and this pipeline are **host-agnostic**. Running it from any host
 needs two things in place:
 
-**1. The bridge MCP tools are connected**, so `gemini_agent` / `claude_agent` /
+**1. The bridge MCP tools are connected**, so `antigravity_agent` / `claude_agent` /
 `codex_agent` are callable from your session:
 
 - **Claude Code:** `make install-claude` — installs the plugin (tools + skills) from a
@@ -325,8 +325,8 @@ needs two things in place:
   into Codex's frozen cache and wires up the tools — no separate `codex mcp add`.
 
 Then call the tools for the models you want as reviewers — for diversity, prefer
-families other than your host (from a Codex host lean on `gemini_agent` +
-`claude_agent`; from a Claude Code host on `gemini_agent` + `codex_agent`; from an
+families other than your host (from a Codex host lean on `antigravity_agent` +
+`claude_agent`; from a Claude Code host on `antigravity_agent` + `codex_agent`; from an
 Antigravity host on `claude_agent` + `codex_agent`).
 
 **2. The orchestrator can see this playbook.** How a host surfaces it differs:
@@ -358,13 +358,13 @@ Antigravity host on `claude_agent` + `codex_agent`).
   step (reason-only, no `working_dir`/`add_dirs`), the finders have only the embedded
   diff to reason over — reason-only blocks unattended file edits and command
   execution. `claude_agent` reason-only additionally passes `--tools ""`, so it has no
-  tools at all and genuinely cannot read; `gemini_agent` reason-only *can* still read
+  tools at all and genuinely cannot read; `antigravity_agent` reason-only *can* still read
   (agy has no tool-disable flag), so it is kept to the diff only because nothing wires
   the repo in. `codex_agent` reason-only is a `--sandbox read-only` mode, so it *can*
   already read the repo and run read-only commands; you still give it the diff inline
   for a uniform, scoped input. If a finding genuinely needs wider context: `codex_agent` (default read-only) and
   `claude_agent` with `mode: "read"` (plan mode) both permit repo reads — point them at the
-  repo with `working_dir` (else they read the bridge server's own directory). `gemini_agent`
+  repo with `working_dir` (else they read the bridge server's own directory). `antigravity_agent`
   has **no read-only tier**, so `mode: "act"` is the only way to let it touch the repo — and
   that grants *full unattended execution* (`--dangerously-skip-permissions`: file writes +
   arbitrary commands), so reach for it sparingly, scope it with `working_dir`, and contain it

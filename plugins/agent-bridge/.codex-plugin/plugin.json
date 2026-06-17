@@ -1,7 +1,7 @@
 {
   "name": "agent-bridge",
   "version": "0.1.0",
-  "description": "Bidirectional agent bridge as an MCP server (gemini_agent / claude_agent / codex_agent), plus skills for delegating to Gemini and running cross-model code reviews.",
+  "description": "Bidirectional agent bridge as an MCP server (antigravity_agent / claude_agent / codex_agent), plus skills for delegating to Antigravity and running cross-model code reviews.",
   "author": {
     "name": "Alexey Dubkov",
     "email": "alexey@dubkov.com"
@@ -22,8 +22,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Bridge",
-    "shortDescription": "Spawn Gemini/Claude/Codex sub-agents; run cross-model reviews",
-    "longDescription": "Exposes gemini_agent, claude_agent, and codex_agent as MCP tools so any host agent can spawn a sub-agent in another model family, and ships skills for delegating work to Gemini and for running multi-model (cross-family) code reviews of a diff. Installing this plugin registers both the bundled MCP server and the skills.",
+    "shortDescription": "Spawn Antigravity/Claude/Codex sub-agents; run cross-model reviews",
+    "longDescription": "Exposes antigravity_agent, claude_agent, and codex_agent as MCP tools so any host agent can spawn a sub-agent in another model family, and ships skills for delegating work to Antigravity (Gemini) and for running multi-model (cross-family) code reviews of a diff. Installing this plugin registers both the bundled MCP server and the skills.",
     "developerName": "Alexey Dubkov",
     "category": "Engineering",
     "capabilities": [
@@ -32,7 +32,7 @@
     ],
     "defaultPrompt": [
       "Run a cross-model review of my current diff.",
-      "Delegate this task to a Gemini sub-agent."
+      "Delegate this task to an Antigravity sub-agent."
     ]
   }
 }

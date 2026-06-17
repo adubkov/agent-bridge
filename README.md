@@ -3,16 +3,16 @@
 > A bridge between coding agents — expose each agent's CLI as a spawnable
 > sub-agent tool. Today it ships an MCP server (the `agent-bridge-mcp` binary,
 > under [`cmd/agent-bridge-mcp`](cmd/agent-bridge-mcp)) with bidirectional
-> **Claude ↔ Gemini** delegation plus an OpenAI **Codex** sub-agent.
+> **Claude ↔ Antigravity** delegation plus an OpenAI **Codex** sub-agent.
 > _(Formerly `agy-mcp` / `agy-gemini`.)_
 
 A tiny [MCP](https://modelcontextprotocol.io) server that bridges coding agents,
 exposing each as a spawnable sub-agent tool. One binary registers three tools:
 
-- **`gemini_agent`** — shells out to the Antigravity CLI (`agy --print <task>`),
-  i.e. spawns a **Gemini** sub-agent. Intended to be called from a Claude session.
+- **`antigravity_agent`** — shells out to the Antigravity CLI (`agy --print <task>`),
+  i.e. spawns an **Antigravity** (Gemini) sub-agent. Intended to be called from a Claude session.
 - **`claude_agent`** — shells out to the Claude CLI (`claude --print <task>`),
-  i.e. spawns a **Claude** sub-agent. Intended to be called from a Gemini session.
+  i.e. spawns a **Claude** sub-agent. Intended to be called from an Antigravity session.
 - **`codex_agent`** — shells out to the OpenAI Codex CLI (`codex exec <task>`),
   i.e. spawns a **Codex** sub-agent. Callable from any parent session.
 
@@ -26,25 +26,25 @@ result header / context-cancel / loop-guard behavior is identical; they differ
 only in which CLI they invoke and which CLI-specific flags they support. Adding a
 CLI agent is a single entry in the in-code backend registry, not new code.
 
-## Tool: `gemini_agent`
+## Tool: `antigravity_agent`
 
-Spawns a Gemini agent via the Antigravity `agy` CLI.
+Spawns an Antigravity agent (Google's `agy` CLI), which runs Gemini models.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
-| `task` | string (required) | — | The complete, self-contained task/prompt for Gemini. |
+| `task` | string (required) | — | The complete, self-contained task/prompt for the agent. |
 | `add_dirs` | string[] | — | Directories to add to the agent's workspace (absolute paths). Repeated as `--add-dir`. |
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
-| `mode` | string | `reason` | Access tier: `reason` (no permission-bypass — no unattended edits/commands; but agy has **no** tool-disable flag, so read tools remain) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. |
-| `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Gemini-only** — `claude_agent` has no `sandbox` param. |
+| `mode` | string | `reason` | Access tier: `reason` (no permission-bypass — no unattended edits/commands; but agy has **no** tool-disable flag, so read tools remain) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for `antigravity_agent`. |
+| `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Antigravity-only** — `claude_agent` has no `sandbox` param. |
 
 ## Tool: `claude_agent`
 
 Spawns a **Claude** agent via the `claude` CLI. This is the reverse direction:
-intended to be called *from a Gemini session* so Gemini can delegate to Claude.
-It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
+intended to be called *from an Antigravity session* so it can delegate to Claude.
+It mirrors `antigravity_agent`'s semantics. **Note:** every run shells out to the
 `claude` CLI and therefore **consumes Claude credits** — even reason-only runs.
 
 | Param | Type | Default | Notes |
@@ -57,7 +57,7 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
 | `mode` | string | `reason` | Access tier: `reason` (no tools — hard-locked via `--tools ""`, so genuinely read-incapable) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
 
-There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
+There is **no `sandbox` param** on `claude_agent` — sandboxing is Antigravity-only and
 `--sandbox` is never passed to `claude`.
 
 ## Tool: `codex_agent`
@@ -90,7 +90,7 @@ By default (`mode: "reason"`) the spawned agent runs `--print` with **no permiss
 bypass**, so it can analyze, draft, and answer but cannot take unattended actions (no
 edits / commands). Whether it can still *read* depends on the backend: `claude_agent`
 hard-disables every tool in `reason` (`--tools ""`), so it is genuinely
-reason/answer only; `gemini_agent` has no tool-disable flag, so its read tools stay
+reason/answer only; `antigravity_agent` has no tool-disable flag, so its read tools stay
 available (agy auto-allows reads); `codex_agent` `reason` is a read-only sandbox
 (below). `claude_agent` also offers `mode: "read"` — read-only
 exploration (read/grep files via `--permission-mode plan`, no edits or commands). To
@@ -99,7 +99,7 @@ let an agent actually act on your files/system, set `mode: "act"`, which passes
 off — this is unattended execution). Scope it with `working_dir`; the agent's edits
 land there.
 
-For `gemini_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
+For `antigravity_agent`, `--sandbox` is **off by default**: with it on, `agy` confines
 the agent to an isolated scratch dir, so edits would *not* reach `working_dir`.
 Set `sandbox: true` only for a confined "compute but don't touch my files" run.
 `claude_agent` has no sandbox concept.
@@ -115,7 +115,7 @@ requested, and the elapsed time: `[<tool> | <modeNote> | <model/effort> | <elaps
 
 ### Loop guard (`AGENT_HOP_DEPTH` / `AGENT_HOP_MAX`)
 
-Because these tools can call each other (Claude → Gemini → Claude → …), the
+Because these tools can call each other (Claude → Antigravity → Claude → …), the
 shared run path enforces a delegation-depth limit to prevent runaway A→B→A→B
 chains. It reads two environment variables:
 
@@ -154,7 +154,7 @@ go install github.com/adubkov/agent-bridge/cmd/agent-bridge-mcp@latest
 
 Each tool requires its CLI:
 
-- `gemini_agent` needs `agy` on `PATH` (or set `AGY_BIN=/path/to/agy`); the server
+- `antigravity_agent` needs `agy` on `PATH` (or set `AGY_BIN=/path/to/agy`); the server
   falls back to `~/.local/bin/agy`, then `agy`.
 - `claude_agent` needs `claude` on `PATH` (or set `CLAUDE_BIN=/path/to/claude`);
   the server falls back to `~/.local/bin/claude`, then `claude`.
@@ -165,14 +165,14 @@ You only need the CLI for the tool you actually call.
 
 ## Install into Claude Code
 
-Use this when the **parent** is Claude Code (so Claude can delegate to Gemini via
-`gemini_agent`). **Requires `agy` authenticated** (`agy` login once) and on `PATH`
+Use this when the **parent** is Claude Code (so Claude can delegate to Antigravity via
+`antigravity_agent`). **Requires `agy` authenticated** (`agy` login once) and on `PATH`
 (or set `AGY_BIN`; the server also falls back to `~/.local/bin/agy`). Restart Claude
 Code afterward (MCP loads at session start); run `/mcp` and `/plugin` to confirm. The
-tools appear as `gemini_agent`, `claude_agent`, and `codex_agent`.
+tools appear as `antigravity_agent`, `claude_agent`, and `codex_agent`.
 
 This repo is a Claude Code **plugin** (`agent-bridge`): installing it wires the MCP
-server *and* ships the skills (`skills/agent-bridge` for delegating to Gemini, and
+server *and* ships the skills (`skills/agent-bridge` for delegating to Antigravity, and
 `skills/multi-model-review` for cross-model reviews). Claude discovers plugins through
 **marketplaces**, so the repo carries a single-plugin local marketplace
 (`.claude-plugin/marketplace.json`); `make install-claude` registers it and installs
@@ -214,7 +214,7 @@ changes what the agent runs — fine for active development, not for a stable in
 
 ## Install into Antigravity (agy)
 
-Use this when the **parent** is Antigravity/Gemini (so Gemini can delegate to Claude
+Use this when the **parent** is Antigravity (so it can delegate to Claude
 via `claude_agent`). The Antigravity CLI manages plugins with `agy plugin` (run
 `agy plugin help` for the subcommands). Because this repo is a Claude-format plugin
 (`.claude-plugin/plugin.json`), `agy plugin install <plugin-dir>` reads the manifest
@@ -234,8 +234,8 @@ imported `mcp_config.json` would point at an unexpanded
 `${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp` and fail to launch. `make install-agy` copies a
 **frozen** binary into agy's own plugin dir (`~/.gemini/config/plugins/agent-bridge/`) and
 repoints `mcp_config.json` at it — so the install is self-contained and doesn't track your
-checkout (re-run to update). `gemini_agent`, `claude_agent`, and `codex_agent` all become
-available inside agy; from a Gemini session you'll typically call `claude_agent`.
+checkout (re-run to update). `antigravity_agent`, `claude_agent`, and `codex_agent` all become
+available inside agy; from an Antigravity session you'll typically call `claude_agent`.
 
 > **Alternatives (documented agy subcommands):**
 > - `agy plugin import [gemini|claude]` imports plugins *already installed* in the Gemini
@@ -256,8 +256,8 @@ The Claude-format plugin bundles:
 
 ## Install into Codex
 
-Use this when the **parent** is OpenAI Codex (so Codex can delegate to Gemini/Claude via
-`gemini_agent` / `claude_agent`). `make install-codex` installs the plugin — skill **and**
+Use this when the **parent** is OpenAI Codex (so Codex can delegate to Antigravity/Claude via
+`antigravity_agent` / `claude_agent`). `make install-codex` installs the plugin — skill **and**
 bundled MCP server — from a local Codex marketplace:
 
 ```sh
@@ -299,7 +299,7 @@ make uninstall-all # remove from every host whose CLI is on PATH
 make install       # OPTIONAL standalone `go install` into $GOBIN (unrelated to install-all)
 make vet           # static checks
 make smoke         # reason-only round-trip against ALL tools (needs agy + claude + codex authed)
-make smoke-gemini  # round-trip against gemini_agent only (needs agy authed)
+make smoke-antigravity  # round-trip against antigravity_agent only (needs agy authed)
 make smoke-claude  # round-trip against claude_agent only (needs claude authed)
 make smoke-codex   # round-trip against codex_agent only (needs codex authed)
 make help          # list targets
@@ -311,7 +311,7 @@ CLIs are present and skips the rest.
 
 ## Example calls
 
-### `gemini_agent`
+### `antigravity_agent`
 
 Reason-only (safe default):
 
@@ -319,7 +319,7 @@ Reason-only (safe default):
 { "task": "Review this Go error-handling pattern and suggest improvements: ..." }
 ```
 
-Acting mode — let Gemini edit files (auto-approves its permission prompts; scope
+Acting mode — let the Antigravity agent edit files (auto-approves its permission prompts; scope
 it with `working_dir` and verify the diff afterward):
 
 ```json
