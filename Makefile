@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # mcp_config.json at it. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex help
+.PHONY: build install vet test clean smoke smoke-gemini smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). The install-* targets copy this freshly built binary
@@ -131,6 +131,29 @@ uninstall-codex:
 	-codex plugin marketplace remove $(MARKETPLACE)
 	@rm -rf plugins/$(PLUGIN)/skills plugins/$(PLUGIN)/$(BINARY)
 	@echo "removed $(PLUGIN) from Codex."
+
+## install-all: install into every supported host whose CLI is on PATH (claude, agy,
+##              codex). Hosts whose CLI is missing are skipped; a real install failure
+##              aborts. Restart each host after. (`make install` is the unrelated
+##              standalone `go install`.)
+install-all: build
+	@for h in claude agy codex; do \
+	  if command -v $$h >/dev/null 2>&1; then \
+	    echo "=== install-$$h ==="; $(MAKE) --no-print-directory install-$$h || exit $$?; \
+	  else \
+	    echo "=== skip $$h (CLI not on PATH) ==="; \
+	  fi; \
+	done
+
+## uninstall-all: remove the bridge from every supported host whose CLI is on PATH
+uninstall-all:
+	@for h in claude agy codex; do \
+	  if command -v $$h >/dev/null 2>&1; then \
+	    echo "=== uninstall-$$h ==="; $(MAKE) --no-print-directory uninstall-$$h; \
+	  else \
+	    echo "=== skip $$h (CLI not on PATH) ==="; \
+	  fi; \
+	done
 
 ## clean: remove the built binary
 clean:

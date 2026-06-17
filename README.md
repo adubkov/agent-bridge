@@ -279,7 +279,9 @@ itself: **no separate `codex mcp add`**, and the install doesn't track your chec
 
 ```sh
 make build         # compile ./agent-bridge-mcp (referenced by .mcp.json)
-make install       # go install into $GOBIN
+make install-all   # install into every host whose CLI is on PATH (claude / agy / codex)
+make uninstall-all # remove from every host whose CLI is on PATH
+make install       # OPTIONAL standalone `go install` into $GOBIN (unrelated to install-all)
 make vet           # static checks
 make smoke         # reason-only round-trip against ALL tools (needs agy + claude + codex authed)
 make smoke-gemini  # round-trip against gemini_agent only (needs agy authed)
@@ -287,6 +289,10 @@ make smoke-claude  # round-trip against claude_agent only (needs claude authed)
 make smoke-codex   # round-trip against codex_agent only (needs codex authed)
 make help          # list targets
 ```
+
+Per-host targets (`install-claude` / `install-agy` / `install-codex` and their
+`uninstall-*`) install into one host; `make install-all` runs whichever of the three
+CLIs are present and skips the rest.
 
 ## Example calls
 
