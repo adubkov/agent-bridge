@@ -241,10 +241,13 @@ Antigravity host on `claude_agent` + `codex_agent`).
   with `codex_agent`, reason-only already permits repo reads; with `gemini_agent` /
   `claude_agent` there is **no read-only tier** — `allow_tools: true` grants *full
   unattended execution* (`--dangerously-skip-permissions`: file writes + arbitrary
-  commands, and `claude_agent` has no sandbox at all), so reach for it sparingly and
-  always scope it with `working_dir`.
+  commands), so reach for it sparingly and scope it with `working_dir`. For
+  `gemini_agent` you can contain it further with `sandbox: true` — edits land in an
+  isolated scratch dir instead of `working_dir`; `claude_agent` has no sandbox at
+  all, so `working_dir` is its only scoping.
 - **Delegation depth.** Fanning out spawns child agents; the bridge's hop guard
-  (`AGENT_HOP_MAX`) caps nesting. Reason-only finders cannot spawn further, so a
-  single review round stays shallow.
+  (`AGENT_HOP_MAX`) caps nesting *depth*. Reason-only finders are a separate
+  safeguard — having no tools, they cannot spawn children at all — so a single
+  review round stays shallow regardless.
 - **Diversity is the point.** Prefer different families. If only one CLI is
   connected, this is a single-model review; report it as such.
