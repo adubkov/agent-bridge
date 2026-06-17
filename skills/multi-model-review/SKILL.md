@@ -142,10 +142,12 @@ finders flag phantom issues (e.g. a section that only *looks* missing because yo
 trimmed it) and miss real ones. Embedding keeps the review self-contained and
 reproducible; what actually keeps each finder **reason-only — no file writes, no
 state-changing commands** is leaving `mode` at its default `reason` (with `codex_agent`
-falling back to a `--sandbox read-only` mode). (Per-backend nuance: as spawned by the finder step —
-reason-only, no `working_dir`/`add_dirs` — `gemini_agent` / `claude_agent` finders
-have nothing but the inline diff to go on: reason-only blocks unattended file edits
-and command execution, and nothing wires the repo in. `codex_agent` reason-only is a
+falling back to a `--sandbox read-only` mode). (Per-backend nuance on *reads*, as spawned
+by the finder step — reason-only, no `working_dir`/`add_dirs`: `claude_agent` reason-only
+hard-disables all tools (`--tools ""`), so it genuinely has nothing but the inline diff.
+`gemini_agent` reason-only blocks unattended writes/commands but agy still allows read
+tools — so what keeps it to the diff is that nothing wires the repo in: with no
+`working_dir` it sees the bridge's own cwd, not the repo. `codex_agent` reason-only is a
 `--sandbox read-only` mode that technically *could* read the repo, but you still
 hand it the diff inline so all finders judge the same scoped input.) If the diff is
 very large, narrow scope by dropping *whole files* — never by compressing the diff
@@ -189,9 +191,12 @@ serializes tool calls still runs them all, just one after another.
 | `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
 
 > **Keep `codex_agent` scoped.** Its reason-only mode is an *agentic* `--sandbox read-only`
-> run, not a no-tools mode (unlike `gemini_agent` / `claude_agent`, which genuinely cannot
-> read files): if you set `working_dir`/`add_dirs` or tell it to "consult the repo," it will
-> read files and can wander a large tree — slow, and it can burn its usage quota mid-review.
+> run, not a no-tools mode. (Of the diff-only backends, only `claude_agent` reason-only is
+> truly no-tools — it passes `--tools ""` and genuinely cannot read; `gemini_agent`
+> reason-only can *also* read, because agy has no tool-disable flag, and is kept to the diff
+> only by withholding `working_dir`.) For codex: if you set `working_dir`/`add_dirs` or tell
+> it to "consult the repo," it will read files and can wander a large tree — slow, and it can
+> burn its usage quota mid-review.
 > For the finder/verifier passes leave `working_dir` unset and keep the "reason only over the
 > inline diff" line in the prompt. Route to a repo-reading `codex_agent` (with `working_dir`
 > set) only for a *specific* finding that genuinely needs out-of-diff context — see
@@ -350,12 +355,14 @@ Antigravity host on `claude_agent` + `codex_agent`).
   "ONLY JSON" (the templates do) and parse defensively — extract the largest JSON
   array/object from the reply rather than assuming the whole reply is JSON.
 - **Inline-only context, and what it takes to widen it.** As spawned by the finder
-  step (reason-only, no `working_dir`/`add_dirs`), `gemini_agent` / `claude_agent`
-  finders have only the embedded diff to reason over — reason-only blocks unattended
-  file edits and command execution, and nothing wires the repo in. `codex_agent`
-  reason-only is a `--sandbox read-only` mode, so it *can* already read the repo and
-  run read-only commands; you still give it the diff inline for a uniform, scoped
-  input. If a finding genuinely needs wider context: `codex_agent` (default read-only) and
+  step (reason-only, no `working_dir`/`add_dirs`), the finders have only the embedded
+  diff to reason over — reason-only blocks unattended file edits and command
+  execution. `claude_agent` reason-only additionally passes `--tools ""`, so it has no
+  tools at all and genuinely cannot read; `gemini_agent` reason-only *can* still read
+  (agy has no tool-disable flag), so it is kept to the diff only because nothing wires
+  the repo in. `codex_agent` reason-only is a `--sandbox read-only` mode, so it *can*
+  already read the repo and run read-only commands; you still give it the diff inline
+  for a uniform, scoped input. If a finding genuinely needs wider context: `codex_agent` (default read-only) and
   `claude_agent` with `mode: "read"` (plan mode) both permit repo reads — point them at the
   repo with `working_dir` (else they read the bridge server's own directory). `gemini_agent`
   has **no read-only tier**, so `mode: "act"` is the only way to let it touch the repo — and

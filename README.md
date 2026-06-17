@@ -37,7 +37,7 @@ Spawns a Gemini agent via the Antigravity `agy` CLI.
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
-| `mode` | string | `reason` | Access tier: `reason` (no tools) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. |
+| `mode` | string | `reason` | Access tier: `reason` (no permission-bypass — no unattended edits/commands; but agy has **no** tool-disable flag, so read tools remain) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for gemini. |
 | `sandbox` | bool | **false** | Confine the agent to an isolated scratch dir (`--sandbox`). **Warning:** when true, its edits go to the scratch dir, NOT `working_dir`. Leave off for real edits. **Gemini-only** — `claude_agent` has no `sandbox` param. |
 
 ## Tool: `claude_agent`
@@ -55,7 +55,7 @@ It mirrors `gemini_agent`'s semantics. **Note:** every run shells out to the
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
-| `mode` | string | `reason` | Access tier: `reason` (no tools) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
+| `mode` | string | `reason` | Access tier: `reason` (no tools — hard-locked via `--tools ""`, so genuinely read-incapable) · `read` (read-only exploration — read/grep files, no edits/exec, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Gemini-only and
 `--sandbox` is never passed to `claude`.
@@ -86,9 +86,13 @@ the other backends, not noisier).
 
 ### Safety model (all tools)
 
-By default (`mode: "reason"`) the spawned agent is **reason/answer only** — it runs
-`--print` with no permission bypass, so it can analyze, draft, and answer but cannot
-take unattended actions. `claude_agent` also offers `mode: "read"` — read-only
+By default (`mode: "reason"`) the spawned agent runs `--print` with **no permission
+bypass**, so it can analyze, draft, and answer but cannot take unattended actions (no
+edits / commands). Whether it can still *read* depends on the backend: `claude_agent`
+hard-disables every tool in `reason` (`--tools ""`), so it is genuinely
+reason/answer only; `gemini_agent` has no tool-disable flag, so its read tools stay
+available (agy auto-allows reads); `codex_agent` `reason` is a read-only sandbox
+(below). `claude_agent` also offers `mode: "read"` — read-only
 exploration (read/grep files via `--permission-mode plan`, no edits or commands). To
 let an agent actually act on your files/system, set `mode: "act"`, which passes
 `--dangerously-skip-permissions` to the underlying CLI (the child's approval gates are

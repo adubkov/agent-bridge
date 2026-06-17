@@ -136,9 +136,9 @@ func TestBuildClaudeArgs(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "default reason-only: task is value right after --print, no other flags",
+			name: "default reason-only: task right after --print, then the --tools \"\" no-tools lock",
 			in:   runOpts{task: "do the thing", timeoutSeconds: 300},
-			want: []string{"--print", "do the thing"},
+			want: []string{"--print", "do the thing", "--tools", ""},
 		},
 		{
 			name: "allow_tools adds --dangerously-skip-permissions after the task",
@@ -148,27 +148,27 @@ func TestBuildClaudeArgs(t *testing.T) {
 		{
 			name: "model adds --model only when non-empty",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "opus"},
-			want: []string{"--print", "ask", "--model", "opus"},
+			want: []string{"--print", "ask", "--model", "opus", "--tools", ""},
 		},
 		{
 			name: "empty/whitespace model is dropped",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "   "},
-			want: []string{"--print", "ask"},
+			want: []string{"--print", "ask", "--tools", ""},
 		},
 		{
 			name: "add_dirs becomes repeated --add-dir entries",
 			in:   runOpts{task: "ctx", timeoutSeconds: 300, addDirs: []string{"/a", "/b"}},
-			want: []string{"--print", "ctx", "--add-dir", "/a", "--add-dir", "/b"},
+			want: []string{"--print", "ctx", "--add-dir", "/a", "--add-dir", "/b", "--tools", ""},
 		},
 		{
 			name: "sandbox is ignored for claude (no --sandbox ever)",
 			in:   runOpts{task: "compute", timeoutSeconds: 300, sandbox: true},
-			want: []string{"--print", "compute"},
+			want: []string{"--print", "compute", "--tools", ""},
 		},
 		{
 			name: "effort adds --effort after the task",
 			in:   runOpts{task: "think hard", timeoutSeconds: 300, effort: "xhigh"},
-			want: []string{"--print", "think hard", "--effort", "xhigh"},
+			want: []string{"--print", "think hard", "--effort", "xhigh", "--tools", ""},
 		},
 		{
 			name: "read mode appends --permission-mode plan (claude's read-only tier)",
@@ -176,14 +176,14 @@ func TestBuildClaudeArgs(t *testing.T) {
 			want: []string{"--print", "review", "--permission-mode", "plan"},
 		},
 		{
-			name: "model then effort then add-dir ordering",
+			name: "model then effort then add-dir ordering, then --tools \"\" last",
 			in:   runOpts{task: "t", timeoutSeconds: 300, model: "opus", effort: "high", addDirs: []string{"/a"}},
-			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a"},
+			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a", "--tools", ""},
 		},
 		{
 			name: "no --print-timeout even with a timeout set",
 			in:   runOpts{task: "wait", timeoutSeconds: 600},
-			want: []string{"--print", "wait"},
+			want: []string{"--print", "wait", "--tools", ""},
 		},
 		{
 			name: "all options combined, correct ordering, no --sandbox / no --print-timeout",
@@ -222,6 +222,21 @@ func TestBuildClaudeArgs(t *testing.T) {
 			// --print must be first and the task its immediate value.
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
 				t.Errorf("claudeBackend.buildArgs must start with --print <task>; got %#v", got)
+			}
+			// Reason tier MUST hard-disable tools via `--tools ""`; read/act must NOT
+			// (read uses --permission-mode plan; act passes the skip-perms flag).
+			hasToolsLock := false
+			for i := 0; i+1 < len(got); i++ {
+				if got[i] == "--tools" && got[i+1] == "" {
+					hasToolsLock = true
+				}
+			}
+			reasonMode := !tt.in.allowTools && !tt.in.readOnly
+			if reasonMode && !hasToolsLock {
+				t.Errorf(`claude reason mode must include --tools "" no-tools lock; got %#v`, got)
+			}
+			if !reasonMode && hasToolsLock {
+				t.Errorf(`claude non-reason mode must NOT include --tools ""; got %#v`, got)
 			}
 		})
 	}
@@ -741,10 +756,10 @@ func TestModeNotes(t *testing.T) {
 		want string
 	}{
 		{
-			name: "gemini reason-only",
+			name: "gemini reason-only reports read tools remain (agy has no no-tools flag)",
 			b:    geminiBackend,
 			in:   runOpts{},
-			want: "tool-use: disabled (reason/answer only)",
+			want: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
 		},
 		{
 			name: "gemini allow_tools without sandbox",

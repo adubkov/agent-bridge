@@ -18,8 +18,9 @@
 // entry, not new code.
 //
 // Access mode: the `mode` param selects the access tier — `reason` (default; no
-// tools, reason/answer only), `read` (read-only exploration), or `act` (full file
-// edits + command execution, unattended). Acting passes a permission-bypass flag:
+// permission-bypass, so no unattended writes/commands), `read` (read-only
+// exploration), or `act` (full file edits + command execution, unattended). Acting
+// passes a permission-bypass flag:
 //   - gemini_agent passes --dangerously-skip-permissions to `agy`.
 //   - claude_agent passes --dangerously-skip-permissions to `claude`.
 //   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
@@ -34,6 +35,16 @@
 // default (`mode: "reason"`/`"read"`) runs it in a read-only sandbox
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
+//
+// Reason tier — does it disable READS? Only for claude_agent. Omitting the
+// skip-perms flag stops unattended writes/commands but does NOT stop a CLI from
+// reading: both `claude --print` and `agy --print` auto-allow their read tools. So
+// claude_agent's `reason` additionally passes `--tools ""` to hard-disable ALL
+// built-in tools (a true no-tools run). agy has no tool-disabling flag, so
+// gemini_agent's `reason` can still read; codex_agent's `reason` is the read-only
+// sandbox above. A reason child may therefore still read the filesystem unless it is
+// claude_agent — which is why the finder step also withholds `working_dir` so a
+// reading backend sees the server's cwd, not the repo under review.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
@@ -147,7 +158,8 @@ const (
 		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
 		"(low|medium|high|xhigh|max) to control reasoning effort. Note: even reason-only runs consume Claude credits."
 
-	geminiModeDescription = "Access mode (default `reason`). `reason` = reason/answer only, no tools. `act` = edit " +
+	geminiModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass, so no unattended file " +
+		"edits / commands — but agy has no tool-disabling flag, so the agent may still use read tools. `act` = edit " +
 		"files in working_dir + run commands UNATTENDED (passes --dangerously-skip-permissions). gemini_agent has NO " +
 		"read-only tier, so `read` is rejected — use `reason` or `act`."
 
@@ -224,9 +236,12 @@ type backend struct {
 	extraArgs []string
 
 	// reasonOnlyArgs are appended in the default `reason` mode — the restraint a
-	// CLI needs to stay read-only when it has no true no-tools mode (codex:
-	// ["--sandbox", "read-only"]). gemini/claude leave this nil: omitting the
-	// skip-perms flag already makes them reason-only.
+	// CLI needs to stay safe in the no-bypass tier. codex uses ["--sandbox",
+	// "read-only"] (it has no true no-tools mode); claude uses ["--tools", ""] to
+	// HARD-DISABLE all built-in tools, because omitting the skip-perms flag alone does
+	// NOT stop `claude --print` from reading (its read tools are auto-allowed). gemini
+	// leaves this nil: agy has no tool-disabling flag, so its reason tier can still
+	// read — see reasonOnlyNote.
 	reasonOnlyArgs []string
 
 	// readOnlyArgs are appended in `read` mode — the flags that grant read-only
@@ -325,8 +340,9 @@ func (b backend) buildArgs(o runOpts) []string {
 	args = append(args, b.extraArgs...)
 	// Restraint args for the non-acting tiers: `read` mode emits readOnlyArgs
 	// (claude --permission-mode plan / codex --sandbox read-only); the default
-	// `reason` mode emits reasonOnlyArgs (codex's read-only sandbox; gemini/claude
-	// none). The act tier emitted its skip-perms flag above and adds neither.
+	// `reason` mode emits reasonOnlyArgs (codex's read-only sandbox; claude's
+	// --tools "" no-tools lock; gemini none — agy has no tool-disabling flag). The
+	// act tier emitted its skip-perms flag above and adds neither.
 	switch {
 	case o.allowTools:
 		// skip-perms flag already emitted; no restraint args.
@@ -399,9 +415,12 @@ var backends = []backend{
 		skipPermsFlag:   "--dangerously-skip-permissions",
 		sandboxFlag:     "--sandbox",
 		timeoutHeadroom: geminiTimeoutHeadroom,
-		// no readOnlyArgs — gemini has no read-only tier (only reason or act).
-		description: geminiToolDescription,
-		modeDesc:    geminiModeDescription,
+		// no readOnlyArgs — gemini has no read-only tier (only reason or act). agy also
+		// has no tool-disabling flag, so reason omits the bypass flag (no unattended
+		// writes) but its read tools stay available; reasonOnlyNote says so honestly.
+		reasonOnlyNote: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
+		description:    geminiToolDescription,
+		modeDesc:       geminiModeDescription,
 	},
 	{
 		tool:          "claude_agent",
@@ -412,7 +431,12 @@ var backends = []backend{
 		effortFlag:    "--effort",
 		addDirFlag:    "--add-dir",
 		skipPermsFlag: "--dangerously-skip-permissions",
-		readOnlyArgs:  []string{"--permission-mode", "plan"}, // claude's read-only tier (plan mode)
+		// reason tier: hard-disable ALL built-in tools. Omitting skip-perms is NOT
+		// enough — `claude --print` auto-allows Read/Grep/Glob, so a reason run could
+		// still read the filesystem. `--tools ""` (documented: "" disables all tools)
+		// makes reason genuinely no-tools, matching the "reason/answer only" header.
+		reasonOnlyArgs: []string{"--tools", ""},
+		readOnlyArgs:   []string{"--permission-mode", "plan"}, // claude's read-only tier (plan mode)
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
 		description: claudeToolDescription,
 		modeDesc:    claudeModeDescription,
