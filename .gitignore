@@ -8,3 +8,8 @@ agent-bridge-mcp
 # `./agent-bridge-mcp` relative to the installed plugin).
 /plugins/agent-bridge/skills/
 /plugins/agent-bridge/agent-bridge-mcp
+# Scratch diff/patch artifacts a sub-agent (e.g. agy) writes when pointed at the repo
+# as its working_dir — it saves `git diff` output to a file to inspect it. Not source.
+*.patch
+diff_*.txt
+*_diff.txt
