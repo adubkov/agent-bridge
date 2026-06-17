@@ -247,7 +247,10 @@ Antigravity host on `claude_agent` + `codex_agent`).
   all, so `working_dir` is its only scoping.
 - **Delegation depth.** Fanning out spawns child agents; the bridge's hop guard
   (`AGENT_HOP_MAX`) caps nesting *depth*. Reason-only finders are a separate
-  safeguard — having no tools, they cannot spawn children at all — so a single
-  review round stays shallow regardless.
+  safeguard: `gemini_agent` / `claude_agent` reason-only have no tools at all, and
+  `codex_agent` reason-only is a `--sandbox read-only` mode (reads and read-only
+  commands, no state-changing actions) — so none of them can perform the
+  state-changing spawn of a child agent, and a single review round stays shallow
+  regardless.
 - **Diversity is the point.** Prefer different families. If only one CLI is
   connected, this is a single-model review; report it as such.
