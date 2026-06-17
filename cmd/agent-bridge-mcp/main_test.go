@@ -685,7 +685,10 @@ func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 	// ~6.9 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
 	bin := writeFakeBin(t, "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxx\\n' 1>&2; i=$((i+1)); done\nprintf 'REAL-ERROR-AT-END\\n' 1>&2\nexit 1\n")
-	tb := withBin(t, antigravityBackend, bin)
+	// Use a pipe-path backend (codex — exactly the case this models): its stderr is
+	// captured separately and tail-truncated. The pty-run antigravity backend instead
+	// merges stderr into one TTY stream — covered by TestRunAgentPTYMergesStderr.
+	tb := withBin(t, codexBackend, bin)
 
 	res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
 	if err != nil {

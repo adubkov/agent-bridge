@@ -73,6 +73,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -268,6 +269,13 @@ type backend struct {
 	// (antigravity/agy); zero for claude/codex (the context deadline is the timeout).
 	timeoutHeadroom time.Duration
 
+	// needsPTY runs the CLI attached to a pseudo-terminal instead of plain pipes.
+	// Required for agy: its agentic `--print` loop only runs to completion with a
+	// controlling TTY — spawned headless (pipes) it hangs until killed, burning the
+	// whole timeout. claude/codex are built for headless --print/exec and leave this
+	// false. Only honored where ptySupported (unix); elsewhere it falls back to pipes.
+	needsPTY bool
+
 	description string // model-facing tool description
 	modeDesc    string // description for the `mode` param
 	effortDesc  string // description for the effort param ("" if the backend has no effort lever)
@@ -423,6 +431,7 @@ var backends = []backend{
 		skipPermsFlag:   "--dangerously-skip-permissions",
 		sandboxFlag:     "--sandbox",
 		timeoutHeadroom: antigravityTimeoutHeadroom,
+		needsPTY:        true, // agy's agentic --print hangs without a controlling TTY
 		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
 		// has no tool-disabling flag and does not gate writes behind the bypass flag, so a
 		// reason agent with a writable working_dir can still read AND edit unattended (use
@@ -749,15 +758,25 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	// spawned die too) and bound how long Run may block on I/O afterward. Without
 	// this, a surviving grandchild that inherited the stdout/stderr pipes keeps
 	// them open and cmd.Run() hangs past the deadline, leaking the goroutine/fds.
-	setupProcessGroup(cmd)
 	cmd.WaitDelay = childWaitDelay
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
 	start := time.Now()
-	runErr := cmd.Run()
+	var runErr error
+	if b.needsPTY && ptySupported {
+		// Run on a pseudo-terminal: agy's agentic --print hangs on plain pipes.
+		// runOnPTY installs its own session-based process-group kill (pty.Start adds
+		// Setsid, so we must NOT also Setpgid — setpgid on a session leader is EPERM)
+		// and returns combined stdout+stderr, which we de-TTY (strip ANSI/CR) into stdout.
+		var out []byte
+		out, runErr = runOnPTY(cmd)
+		stdout.WriteString(cleanPTYOutput(out))
+	} else {
+		setupProcessGroup(cmd)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+	}
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	// If the parent context was canceled, return the cancellation error
@@ -790,6 +809,23 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 
 	header := fmt.Sprintf("[%s | %s | %s | %s]\n\n", b.tool, modeNoteStr, b.selectionNote(o), elapsed)
 	return mcp.NewToolResultText(header + out), nil
+}
+
+// ansiEscapeRE matches the terminal control sequences a CLI emits when it thinks
+// it is driving a TTY: CSI sequences (colors, cursor moves, line clears), OSC
+// sequences (window-title sets, terminated by BEL), and the remaining two-byte
+// escapes. A pty-run backend's output is laced with these; we strip them so the
+// result the model receives is plain text (e.g. parseable JSON), matching what the
+// pipe-run backends already return.
+var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07]*\x07|\x1b[@-_]")
+
+// cleanPTYOutput turns raw pseudo-terminal output into plain text: it strips ANSI
+// escape sequences and normalizes the TTY's CRLF / bare-CR line endings to LF.
+func cleanPTYOutput(b []byte) string {
+	s := ansiEscapeRE.ReplaceAllString(string(b), "")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }
 
 // truncate returns a copy of s truncated to at most limit bytes, without
