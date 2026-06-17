@@ -29,9 +29,11 @@ setup.
 
 ## Prerequisites
 
-- The agent-bridge MCP server is connected in your host. Check which of
-  `antigravity_agent`, `claude_agent`, `codex_agent` are actually available (and their
-  CLIs authed).
+- The agent-bridge MCP server is connected in your host. Call **`list_agents`** to see
+  which backends are usable: `probe: "installed"` (which CLIs resolve) or `probe: "auth"`
+  (also whether they're authed — claude/codex report `yes`/`no`, agy is `unknown` as it
+  has no auth-status command). `probe: "serve"` does a real PONG round-trip if you want
+  proof a backend can actually answer (costs a call; agy is slow — raise `timeout_seconds`).
 - **Use whichever subset is connected.** With all three you get full cross-family
   diversity; with two it still works; with one this degrades to a single-model
   review — **say so** in the report rather than implying multi-model coverage.
@@ -46,6 +48,13 @@ Each finder/verifier spawn takes a `model` and — for `claude_agent` / `codex_a
 and **honor any user override** from the orchestrator prompt. (This tier controls
 model/effort only; whether you cross-verify is the separate Fast-mode choice below — the two
 compose.)
+
+**Shortcut: pass `tier` and let the server resolve it.** Every backend tool accepts a
+`tier` param (`deep`/`fast`) that the bridge resolves to the model+effort below —
+including discovering agy's model from `agy models` **server-side** — so you can pass
+`tier: "deep"` instead of wiring `model`/`effort` per family. An explicit `model`/`effort`
+still overrides the tier per-field. The table below is what each tier resolves to (and
+your reference when overriding).
 
 ### Default tiers — drive selection from a tier, default `deep`
 
@@ -62,10 +71,11 @@ Why these stay current (no hardcoded version strings):
   OpenAI updates, so "no model" already means most-capable-and-current. Express the tier with
   `effort` only. (Do **not** use `codex-auto-review` — it's an approval-gating model, not a
   code reviewer.)
-- **Gemini** — agy has no alias and bakes effort into the model *name*, so **discover** at
-  review start: run `agy models`, pick the line matching the tier (deep → a `*Pro* (High)`
-  entry; fast → a `*Flash* (Medium)` entry), and pass that label as `model`. Resolve once and
-  reuse across the wave. If agy rejects the label, fall back to its default by omitting `model`.
+- **Gemini** — agy has no alias and bakes effort into the model *name*. Passing `tier` lets
+  the **server** discover it (it matches `agy models` output: deep → a `*Pro* (High)` entry,
+  fast → a `*Flash* (Medium)` entry, cached per process). To pick the model yourself instead,
+  run `agy models` and pass the matching label as `model` — an explicit `model` overrides the
+  tier; if agy rejects a label, omit `model` to fall back to its default.
 
 Effort vocab differs across families — Claude takes `low|medium|high|xhigh|max`, Codex tops out
 at `high`. Use the per-family value above; if a user asks for "max" on Codex, map it to `high`.

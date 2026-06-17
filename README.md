@@ -7,7 +7,8 @@
 > _(Formerly `agy-mcp` / `agy-gemini`.)_
 
 A tiny [MCP](https://modelcontextprotocol.io) server that bridges coding agents,
-exposing each as a spawnable sub-agent tool. One binary registers three tools:
+exposing each as a spawnable sub-agent tool. One binary registers three sub-agent
+tools plus a `list_agents` discovery tool:
 
 - **`antigravity_agent`** — shells out to the Antigravity CLI (`agy --print <task>`),
   i.e. spawns an **Antigravity** (Gemini) sub-agent. Intended to be called from a Claude session.
@@ -15,6 +16,9 @@ exposing each as a spawnable sub-agent tool. One binary registers three tools:
   i.e. spawns a **Claude** sub-agent. Intended to be called from an Antigravity session.
 - **`codex_agent`** — shells out to the OpenAI Codex CLI (`codex exec <task>`),
   i.e. spawns a **Codex** sub-agent. Callable from any parent session.
+- **`list_agents`** — read-only discovery: reports which backends are installed (and,
+  on request, authed or able to serve a request), so a caller can pick its sub-agent
+  set before fanning out. Takes no task — it inspects the host, it doesn't spawn an agent.
 
 A parent agent calls a tool with a self-contained task; this server shells out to
 the corresponding CLI, lets the child agent perform it, and returns the child's
@@ -37,6 +41,7 @@ Spawns an Antigravity agent (Google's `agy` CLI), which runs Gemini models.
 | `working_dir` | string | server cwd | Directory the agent runs in (sets `cmd.Dir`). |
 | `timeout_seconds` | number | 300 (max 1800) | Maps to `agy --print-timeout`. |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. agy has **no family alias** and bakes effort into the model *name* (e.g. `Gemini 3.1 Pro (High)`) — list current names with `agy models`. No separate `effort` param. |
+| `tier` | string | — | Optional reviewer tier `deep`/`fast`; the server resolves it to a model by matching `agy models` output at runtime (deep → a `*Pro* (High)` entry, fast → `*Flash* (Medium)`), cached. An explicit `model` overrides it. |
 | `mode` | string | `reason` | Access tier: `reason` (no permission-bypass flag; but agy has **no** tool-disable flag and does **not** gate writes, so a `reason` agent with a writable `working_dir` can still read **and** edit files unattended — use a throwaway `working_dir` to keep it off your files; omitting `working_dir` is **not** a guard (agy then runs in the bridge server's own cwd, often your project tree), and `--sandbox` does **not** confine writes) · `act` (edit files in `working_dir` + run commands via `--dangerously-skip-permissions`, unattended). **No `read` tier** for `antigravity_agent`. |
 | `sandbox` | bool | **false** | Enable agy's sandbox terminal restrictions (`--sandbox`). **Note:** despite the name this does **not** confine the agent's *file* edits — a write under `--sandbox` still lands in `working_dir` (verified), so it is not a "don't touch my files" guard; use a throwaway `working_dir` for that. **Antigravity-only** — `claude_agent` has no `sandbox` param. |
 
@@ -55,6 +60,7 @@ It mirrors `antigravity_agent`'s semantics. **Note:** every run shells out to th
 | `timeout_seconds` | number | 300 (max 1800) | The `claude` CLI has **no** `--print-timeout`; the timeout is enforced purely by the process context deadline (no timeout flag is passed to `claude`). |
 | `model` | string | CLI default | Optional; `--model <model>` when non-empty. Accepts **family aliases** `opus`/`sonnet`/`haiku` (always resolve to the latest) or a full model name. |
 | `effort` | string | model default | Optional reasoning effort; `--effort <level>` when non-empty. Accepts `low\|medium\|high\|xhigh\|max`. |
+| `tier` | string | — | Optional reviewer tier `deep`/`fast` → (model, effort): deep = `opus`/`xhigh`, fast = `sonnet`/`medium`. Explicit `model`/`effort` override it per-field. |
 | `mode` | string | `reason` | Access tier: `reason` (no tools — hard-locked via `--tools ""`, so genuinely read-incapable) · `read` (read-only exploration — read/grep files + read-only commands like `git diff`, no edits or effectful commands, via `--permission-mode plan`) · `act` (full edit/run via `--dangerously-skip-permissions`, unattended — **consumes Claude credits**). |
 
 There is **no `sandbox` param** on `claude_agent` — sandboxing is Antigravity-only and
@@ -75,6 +81,7 @@ sandbox* (`reason`/`read`) and *full, unsandboxed access* (`act`) rather than of
 | `timeout_seconds` | number | 300 (max 1800) | Codex `exec` has **no** internal timeout flag; the timeout is enforced purely by the process context deadline. |
 | `model` | string | provider default | Optional; `--model <model>` when non-empty. **Omit** to use Codex's recommended *frontier* model (most-capable, auto-current). |
 | `effort` | string | model default | Optional reasoning effort; passed as `-c model_reasoning_effort=<level>` when non-empty (e.g. `minimal\|low\|medium\|high`). |
+| `tier` | string | — | Optional reviewer tier `deep`/`fast` → effort (deep = `high`, fast = `low`); model stays the CLI default (recommended frontier). Explicit `model`/`effort` override it per-field. |
 | `mode` | string | `reason` | Access tier: `reason`/`read` are **both** read-only (`--sandbox read-only`) — Codex reads/reasons but cannot edit or run effectful commands; `act` → `--dangerously-bypass-approvals-and-sandbox`: fully **unattended, unsandboxed** file/command access. |
 
 There is **no `sandbox` param** on `codex_agent` — `mode` already selects
@@ -83,6 +90,23 @@ works outside a Git repo). On success the tool returns Codex's final message;
 Codex's session banner and step-by-step transcript go to **stderr** and are
 surfaced only if the run fails or times out (so a successful result is as clean as
 the other backends, not noisier).
+
+## Tool: `list_agents`
+
+Read-only **discovery** — reports which backends are actually usable on this host, so a
+caller can pick its sub-agent / reviewer set before fanning out. Takes **no task**: it
+inspects the host rather than spawning an agent to do work. Returns a JSON array, one
+entry per backend.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `probe` | string | `installed` | Depth: `installed` (resolve the CLI via `binEnv`/PATH only — **cheap, no spawn**) · `auth` (also run the CLI's own cheap auth/health command — `claude auth status`, `codex doctor --json`; **agy has none, so its auth is reported `unknown`**) · `serve` (**authoritative**: a real PONG round-trip per backend — proves it can serve requests but costs a model call; agy can take minutes). |
+| `timeout_seconds` | number | 15 (auth) / 120 (serve) | Per-backend timeout for the auth/serve probes (max 1800). Ignored for `installed`. agy's `serve` round-trip may need ≥300. |
+
+Each entry carries `{tool, cli, installed, path, source}`; the `auth` probe adds `authed`
+(`yes`/`no`/`unknown`) + `detail`, and `serve` adds `ready` + `latency_ms`. `auth` and
+`serve` shell out, so they are refused for a reason-only (`AGENT_NO_DELEGATE`) child;
+`installed` is always allowed.
 
 ### Safety model (all tools)
 

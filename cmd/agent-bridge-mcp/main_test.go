@@ -1390,6 +1390,13 @@ func TestToolSchemas(t *testing.T) {
 		t.Error("antigravity tool must NOT expose an effort param")
 	}
 
+	// tier appears on every backend that has presets — all three here.
+	for _, tl := range []mcp.Tool{antigravity, claude, codex} {
+		if _, ok := tl.InputSchema.Properties["tier"]; !ok {
+			t.Errorf("%s tool should expose the tier param", tl.Name)
+		}
+	}
+
 	// The antigravity description must not claim sandbox-by-default (the bug this fixes),
 	// and should state sandboxing is off by default.
 	if strings.Contains(antigravity.Description, "by default) runs it in a restricted sandbox") {
@@ -1467,6 +1474,24 @@ func TestBackendRegistry(t *testing.T) {
 			if b.appliesEffort() && b.effortDesc == "" {
 				t.Errorf("backend %q applies effort but has empty effortDesc", b.tool)
 			}
+			// tier param appears iff the backend has presets; each preset must be
+			// well-formed: a runtime-discovered model (modelMatch) needs modelListCmd,
+			// and an effort-capable backend's presets should set effort.
+			if _, ok := tool.InputSchema.Properties["tier"]; ok != (len(b.tiers) > 0) {
+				t.Errorf("tool %q tier-param=%v; len(tiers)=%d", b.tool, ok, len(b.tiers))
+			}
+			for name, spec := range b.tiers {
+				if len(spec.modelMatch) > 0 && len(b.modelListCmd) == 0 {
+					t.Errorf("backend %q tier %q has modelMatch but no modelListCmd to resolve it", b.tool, name)
+				}
+				if b.appliesEffort() && len(spec.modelMatch) == 0 && spec.effort == "" {
+					t.Errorf("backend %q tier %q sets no effort though the backend has an effort lever", b.tool, name)
+				}
+			}
+			// auth probe: an authCheck command must be paired with a parser, and vice-versa.
+			if (len(b.authCheck) > 0) != (b.authParse != nil) {
+				t.Errorf("backend %q authCheck/authParse mismatch (cmd=%v parser=%v)", b.tool, b.authCheck, b.authParse != nil)
+			}
 		})
 	}
 }
@@ -1497,6 +1522,7 @@ func TestSelectionNote(t *testing.T) {
 		{"claude model + effort", claudeBackend, runOpts{model: "opus", effort: "xhigh"}, "model=opus effort=xhigh"},
 		{"claude model only", claudeBackend, runOpts{model: "sonnet"}, "model=sonnet"},
 		{"codex default model + effort", codexBackend, runOpts{effort: "high"}, "model=default effort=high"},
+		{"claude tier echoed in header", claudeBackend, runOpts{model: "opus", effort: "xhigh", tier: "deep"}, "model=opus effort=xhigh tier=deep"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1505,4 +1531,75 @@ func TestSelectionNote(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPickModel(t *testing.T) {
+	const models = `Gemini 3.5 Flash (Medium)
+Gemini 3.5 Flash (High)
+Gemini 3.1 Pro (Low)
+Gemini 3.1 Pro (High)
+Claude Opus 4.6 (Thinking)`
+	tests := []struct {
+		name  string
+		out   string
+		match []string
+		want  string
+	}{
+		{"pro high", models, []string{"Pro", "(High)"}, "Gemini 3.1 Pro (High)"},
+		{"flash medium", models, []string{"Flash", "(Medium)"}, "Gemini 3.5 Flash (Medium)"},
+		{"case-insensitive", models, []string{"pro", "(high)"}, "Gemini 3.1 Pro (High)"},
+		{"no match", models, []string{"Pro", "(Ultra)"}, ""},
+		{"empty match", models, nil, ""},
+		{"first match wins", "Gemini Pro (High) A\nGemini Pro (High) B", []string{"Pro", "(High)"}, "Gemini Pro (High) A"},
+		{"skips blank lines", "\n\n  \nGemini 3.1 Pro (High)\n", []string{"Pro", "(High)"}, "Gemini 3.1 Pro (High)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickModel(tt.out, tt.match); got != tt.want {
+				t.Errorf("pickModel(%q) = %q; want %q", tt.match, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTier(t *testing.T) {
+	// Sentinel discoverer: asserts a modelMatch tier routes through discovery.
+	fakeDiscover := func(match []string) string { return "DISCOVERED:" + strings.Join(match, ",") }
+
+	t.Run("empty tier keeps explicit values", func(t *testing.T) {
+		m, e, err := resolveTier(claudeBackend, "", "opus", "high", fakeDiscover)
+		if err != nil || m != "opus" || e != "high" {
+			t.Fatalf("got (%q,%q,%v); want (opus,high,nil)", m, e, err)
+		}
+	})
+	t.Run("claude deep sets model+effort", func(t *testing.T) {
+		m, e, _ := resolveTier(claudeBackend, "deep", "", "", fakeDiscover)
+		if m != "opus" || e != "xhigh" {
+			t.Errorf("got (%q,%q); want (opus,xhigh)", m, e)
+		}
+	})
+	t.Run("explicit model/effort override tier per-field", func(t *testing.T) {
+		m, e, _ := resolveTier(claudeBackend, "deep", "sonnet", "", fakeDiscover)
+		if m != "sonnet" || e != "xhigh" {
+			t.Errorf("got (%q,%q); want (sonnet,xhigh) — model overridden, effort from tier", m, e)
+		}
+	})
+	t.Run("codex tier sets effort only; model stays default", func(t *testing.T) {
+		m, e, _ := resolveTier(codexBackend, "deep", "", "", fakeDiscover)
+		if m != "" || e != "high" {
+			t.Errorf("got (%q,%q); want (\"\",high)", m, e)
+		}
+	})
+	t.Run("agy tier discovers model, no effort lever", func(t *testing.T) {
+		m, e, _ := resolveTier(antigravityBackend, "deep", "", "", fakeDiscover)
+		if m != "DISCOVERED:Pro,(High)" || e != "" {
+			t.Errorf("got (%q,%q); want discovered model and no effort", m, e)
+		}
+	})
+	t.Run("unknown tier errors", func(t *testing.T) {
+		_, _, err := resolveTier(claudeBackend, "turbo", "", "", fakeDiscover)
+		if err == nil || !strings.Contains(err.Error(), "invalid tier") {
+			t.Errorf("want invalid-tier error; got %v", err)
+		}
+	})
 }

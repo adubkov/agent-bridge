@@ -77,8 +77,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -129,6 +131,7 @@ type runOpts struct {
 	sandbox    bool // antigravity-only boolean --sandbox; ignored by claude/codex
 	model      string
 	effort     string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by antigravity
+	tier       string // resolved reviewer tier (deep/fast) for the result header; "" if none requested
 	addDirs    []string
 	workingDir string
 }
@@ -210,6 +213,16 @@ const (
 		"Accepts minimal | low | medium | high (model-dependent). Leave empty for the default effort."
 )
 
+// tierSpec is the model + reasoning effort a reviewer tier ("deep"/"fast") resolves
+// to for one backend. modelMatch is for backends with no stable model alias (agy):
+// the substrings identifying the tier's model in `<cli> models` output, resolved at
+// runtime (see discoverModel); when modelMatch is set, model is unused.
+type tierSpec struct {
+	model      string
+	effort     string
+	modelMatch []string
+}
+
 // backend declares one CLI adapter as DATA: the shared run/timeout/truncate/
 // header/context-cancel/hop-guard logic lives in runAgent, so adding a CLI
 // coding-agent is a single registry entry (see the registry below), not new code.
@@ -282,6 +295,26 @@ type backend struct {
 	// false. Only honored where ptySupported (unix); elsewhere it falls back to pipes.
 	needsPTY bool
 
+	// tiers maps a reviewer tier ("deep"/"fast") to the model+effort it resolves to,
+	// so a caller can pass a stable tier instead of a CLI-specific model name. nil =
+	// the backend exposes no tier presets (and no `tier` param). See resolveTier.
+	tiers map[string]tierSpec
+
+	// modelListCmd enumerates the CLI's models (e.g. ["models"] for agy) to resolve a
+	// tierSpec.modelMatch at runtime. nil for backends whose tiers carry explicit model
+	// names (claude) or omit the model (codex).
+	modelListCmd []string
+
+	// authCheck is the argv (after the binary) of a cheap, non-inference auth/health
+	// command for list_agents' `auth` probe — claude ["auth","status"], codex
+	// ["doctor","--json"]. nil when the CLI has none (agy) → auth reported "unknown".
+	authCheck []string
+
+	// authParse interprets authCheck's output (and run error) into an auth verdict
+	// ("yes"/"no"/"unknown") + a short detail. Per-CLI because each emits a different
+	// JSON shape (claude loggedIn; codex doctor checks). nil alongside a nil authCheck.
+	authParse func(out []byte, runErr error) (authed, detail string)
+
 	description string // model-facing tool description
 	modeDesc    string // description for the `mode` param
 	effortDesc  string // description for the effort param ("" if the backend has no effort lever)
@@ -299,23 +332,143 @@ func (b backend) supportsReadOnly() bool { return len(b.readOnlyArgs) > 0 }
 // the model name — so its tool omits the effort param and ignores any value passed.
 func (b backend) appliesEffort() bool { return b.effortFlag != "" || b.effortConfigKey != "" }
 
-// resolveBin finds the backend's CLI executable: binEnv override → PATH →
-// ~/.local/bin/<cliName> → bare cliName. The explicit fallback matters because a
-// parent agent may spawn this server with a minimal PATH.
-func (b backend) resolveBin() string {
+// tierNames returns the backend's tier keys in stable (sorted) order, for the
+// `tier` param description and unknown-tier error messages.
+func (b backend) tierNames() []string {
+	names := make([]string, 0, len(b.tiers))
+	for k := range b.tiers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tierDesc builds the `tier` param description, naming the backend's actual presets.
+func (b backend) tierDesc() string {
+	fields := "model"
+	if b.appliesEffort() {
+		fields = "model+effort"
+	}
+	return fmt.Sprintf(
+		"Optional reviewer tier resolving %s for this backend: %s (deep = most capable, fast = cheaper/faster). "+
+			"An explicit `model`/`effort` param overrides the tier per-field. Omit for the CLI/provider default.",
+		fields, strings.Join(b.tierNames(), " | "))
+}
+
+// pickModel returns the first non-empty line of `<cli> models` output containing
+// every substring in match (case-insensitive), trimmed; "" if none match or match
+// is empty. Pure — table-testable.
+func pickModel(modelsOutput string, match []string) string {
+	if len(match) == 0 {
+		return ""
+	}
+	for _, line := range strings.Split(modelsOutput, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		matched := true
+		for _, sub := range match {
+			if !strings.Contains(strings.ToLower(s), strings.ToLower(sub)) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return s
+		}
+	}
+	return ""
+}
+
+// resolveTier maps a tier to (model, effort) for backend b, honoring explicit
+// overrides PER FIELD: an explicit reqModel/reqEffort wins over the tier preset,
+// which beats the CLI default. discover resolves a tierSpec.modelMatch (agy) to a
+// concrete model name; it is injected so tests need no real `agy models` call.
+// Either returned value may be "" (→ CLI default). Returns an error for an unknown
+// tier. Pure given a pure discover.
+func resolveTier(b backend, tier, reqModel, reqEffort string,
+	discover func(match []string) string) (model, effort string, err error) {
+	model, effort = reqModel, reqEffort
+	if strings.TrimSpace(tier) == "" {
+		return model, effort, nil
+	}
+	spec, ok := b.tiers[tier]
+	if !ok {
+		return "", "", fmt.Errorf("invalid tier %q — valid tiers are %s", tier, strings.Join(b.tierNames(), " | "))
+	}
+	if strings.TrimSpace(model) == "" {
+		if len(spec.modelMatch) > 0 {
+			model = discover(spec.modelMatch)
+		} else {
+			model = spec.model
+		}
+	}
+	if strings.TrimSpace(effort) == "" && b.appliesEffort() {
+		effort = spec.effort
+	}
+	return model, effort, nil
+}
+
+// modelCache memoizes discovered model names per (cli, match) for the process
+// lifetime — `<cli> models` output rarely changes mid-run, and a restart re-resolves.
+var modelCache sync.Map // key: cliName + "\x00" + join(match); val: string
+
+// discoverModel runs the backend's modelListCmd and returns the model name matching
+// `match` (see pickModel), memoized. Returns "" on any error/miss so the caller falls
+// back to the CLI default. NOT pure (spawns a subprocess) — deliberately kept out of
+// buildArgs so that stays table-testable.
+func (b backend) discoverModel(match []string) string {
+	if len(b.modelListCmd) == 0 || len(match) == 0 {
+		return ""
+	}
+	key := b.cliName + "\x00" + strings.Join(match, "\x00")
+	if v, ok := modelCache.Load(key); ok {
+		return v.(string)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, b.resolveBin(), b.modelListCmd...).Output()
+	model := ""
+	if err == nil {
+		model = pickModel(string(out), match)
+	}
+	if model != "" {
+		modelCache.Store(key, model) // cache successes only; don't poison on a transient failure
+	}
+	return model
+}
+
+// locate finds the backend's CLI executable and reports HOW it was found, for
+// list_agents' availability probe: binEnv override → PATH → ~/.local/bin/<cliName>.
+// source is "env" | "path" | "local-bin" when found, "" when not. The explicit
+// fallback matters because a parent agent may spawn this server with a minimal PATH.
+func (b backend) locate() (path, source string, found bool) {
 	if v := strings.TrimSpace(os.Getenv(b.binEnv)); v != "" {
-		return v
+		if _, err := os.Stat(v); err == nil {
+			return v, "env", true
+		}
+		return v, "env", false
 	}
 	if p, err := exec.LookPath(b.cliName); err == nil {
-		return p
+		return p, "path", true
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		fallback := filepath.Join(home, ".local", "bin", b.cliName)
 		if _, statErr := os.Stat(fallback); statErr == nil {
-			return fallback
+			return fallback, "local-bin", true
 		}
 	}
-	return b.cliName
+	return b.cliName, "", false
+}
+
+// resolveBin returns the path to the backend's CLI — the resolved executable, or the
+// bare cliName as a last resort so exec surfaces a clear "not found". See locate for
+// the lookup order. A binEnv override is honored even if it does not exist (so the
+// configured path appears verbatim in exec's error).
+func (b backend) resolveBin() string {
+	path, _, _ := b.locate()
+	return path
 }
 
 // buildArgs builds the CLI invocation from the backend's flag spec. CRITICAL for
@@ -418,6 +571,9 @@ func (b backend) selectionNote(o runOpts) string {
 	if b.appliesEffort() && strings.TrimSpace(o.effort) != "" {
 		note += " effort=" + o.effort
 	}
+	if strings.TrimSpace(o.tier) != "" {
+		note += " tier=" + o.tier
+	}
 	return note
 }
 
@@ -438,6 +594,15 @@ var backends = []backend{
 		sandboxFlag:     "--sandbox",
 		timeoutHeadroom: antigravityTimeoutHeadroom,
 		needsPTY:        true, // agy's agentic --print hangs without a controlling TTY
+		modelListCmd:    []string{"models"},
+		tiers: map[string]tierSpec{
+			// agy has no model alias and bakes effort into the model NAME, so the tier's
+			// model is discovered from `agy models` output at runtime (see discoverModel).
+			"deep": {modelMatch: []string{"Pro", "(High)"}},
+			"fast": {modelMatch: []string{"Flash", "(Medium)"}},
+		},
+		// no authCheck: agy exposes no auth/status/doctor subcommand, so list_agents
+		// reports its auth as "unknown" rather than guessing.
 		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
 		// has no tool-disabling flag and does not gate writes behind the bypass flag, so a
 		// reason agent with a writable working_dir can still read AND edit unattended (use a
@@ -462,6 +627,13 @@ var backends = []backend{
 		// makes reason genuinely no-tools, matching the "reason/answer only" header.
 		reasonOnlyArgs: []string{"--tools", ""},
 		readOnlyArgs:   []string{"--permission-mode", "plan"}, // claude's read-only tier (plan mode)
+		tiers: map[string]tierSpec{
+			// opus/sonnet are family aliases that always resolve to the latest model.
+			"deep": {model: "opus", effort: "xhigh"},
+			"fast": {model: "sonnet", effort: "medium"},
+		},
+		authCheck: []string{"auth", "status"}, // cheap, non-inference auth check
+		authParse: parseClaudeAuth,
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
 		description: claudeToolDescription,
 		modeDesc:    claudeModeDescription,
@@ -481,6 +653,13 @@ var backends = []backend{
 		reasonOnlyArgs:   []string{"--sandbox", "read-only"},
 		readOnlyArgs:     []string{"--sandbox", "read-only"}, // codex's reason and read tiers are the same read-only sandbox
 		reasonOnlyNote:   "tool-use: read-only (--sandbox read-only)",
+		tiers: map[string]tierSpec{
+			// model omitted (CLI default = recommended frontier); tier sets effort only.
+			"deep": {effort: "high"},
+			"fast": {effort: "low"},
+		},
+		authCheck: []string{"doctor", "--json"}, // diagnoses install/config/auth/runtime
+		authParse: parseCodexAuth,
 		// promptFlag/timeoutFlag/sandboxFlag "" — codex takes the prompt positionally
 		// (`codex exec [flags] <prompt>`), has no internal print-timeout (timeoutHeadroom
 		// 0 — the ctx deadline IS the timeout), and exposes no boolean sandbox param
@@ -579,6 +758,7 @@ func main() {
 	for _, b := range backends {
 		s.AddTool(newTool(b), makeHandler(b))
 	}
+	s.AddTool(listAgentsTool(), listAgentsHandler)
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-bridge-mcp: server error: %v\n", err)
@@ -628,6 +808,9 @@ func newTool(b backend) mcp.Tool {
 	if b.appliesEffort() {
 		opts = append(opts, mcp.WithString("effort", mcp.Description(b.effortDesc)))
 	}
+	if len(b.tiers) > 0 {
+		opts = append(opts, mcp.WithString("tier", mcp.Description(b.tierDesc())))
+	}
 	if b.supportsSandbox() {
 		opts = append(opts, mcp.WithBoolean("sandbox", mcp.Description(sandboxDescription)))
 	}
@@ -662,6 +845,21 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 			model:          strings.TrimSpace(req.GetString("model", "")),
 			effort:         strings.TrimSpace(req.GetString("effort", "")),
 			workingDir:     req.GetString("working_dir", ""),
+		}
+
+		// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
+		// model/effort params override per-field; for agy the tier's model name is
+		// discovered from `agy models` at runtime. Backends with no presets reject it.
+		if tier := strings.ToLower(strings.TrimSpace(req.GetString("tier", ""))); tier != "" {
+			if len(b.tiers) == 0 {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool)), nil
+			}
+			model, effort, terr := resolveTier(b, tier, o.model, o.effort, b.discoverModel)
+			if terr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr)), nil
+			}
+			o.model, o.effort, o.tier = model, effort, tier
 		}
 
 		// Resolve the access tier from the `mode` enum (reason | read | act); an

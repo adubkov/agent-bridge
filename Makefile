@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # mcp_config.json at it. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
+.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex smoke-list-agents install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). The install-* targets copy this freshly built binary
@@ -37,8 +37,8 @@ test:
 ## smoke: build + smoke-test ALL tools (antigravity_agent + claude_agent + codex_agent).
 ##        Needs agy, claude AND codex authed; runs each in a clean temp dir. For one
 ##        tool, use the smoke-antigravity / smoke-claude / smoke-codex targets.
-smoke: smoke-antigravity smoke-claude smoke-codex
-	@echo "smoke OK (antigravity + claude + codex)"
+smoke: smoke-antigravity smoke-claude smoke-codex smoke-list-agents
+	@echo "smoke OK (antigravity + claude + codex + list_agents)"
 
 # Map each smoke-<label> target to the MCP tool it exercises.
 TOOL_antigravity := antigravity_agent
@@ -55,6 +55,15 @@ smoke-antigravity smoke-claude smoke-codex: smoke-%: build
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"$(TOOL_$*)","arguments":{"task":"Reply with exactly the word: PONG","working_dir":"/tmp/agent-bridge-mcp-smoke-$*","timeout_seconds":120}}}' \
 	| ./$(BINARY) | grep -q PONG && echo "smoke-$* OK" || (echo "smoke-$* FAILED"; exit 1)
+
+## smoke-list-agents: smoke-test the list_agents discovery tool (probe=installed; needs no
+##                    CLIs authed — it only resolves them on PATH, no spawn)
+smoke-list-agents: build
+	@printf '%s\n' \
+	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents","arguments":{"probe":"installed"}}}' \
+	| ./$(BINARY) | grep -q installed && echo "smoke-list-agents OK" || (echo "smoke-list-agents FAILED"; exit 1)
 
 ## install-claude: register this repo as a local marketplace and install the plugin into
 ##                 Claude Code (loads the skills AND the agent-bridge MCP server).
