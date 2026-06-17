@@ -39,6 +39,15 @@
 // (max allowed depth, default 2) from the environment. If the current depth has
 // reached the max, the tool returns an error instead of spawning a child.
 // Otherwise the child is spawned with AGENT_HOP_DEPTH incremented by one.
+//
+// Reason-only freeze: the hop guard bounds depth for AGENTS THAT ACT, but a
+// reason-only child should not delegate at all. So every reason-only child
+// (allow_tools=false) is spawned with AGENT_NO_DELEGATE=1 in its environment;
+// any bridge server that child itself launches sees the flag and refuses to
+// spawn — a hard "no further delegation" stop that does not rely on the depth
+// counter. This matters most for codex_agent, whose reason-only mode is a
+// read-only sandbox that can still run read-only commands (and thus could
+// otherwise re-enter the bridge); gemini/claude reason-only have no tools at all.
 package main
 
 import (
@@ -65,6 +74,14 @@ const (
 	hopMaxEnv       = "AGENT_HOP_MAX"
 	defaultHopMax   = 2
 	defaultHopDepth = 0
+
+	// noDelegateEnv, when "1" in the environment, hard-blocks this server from
+	// spawning ANY child — independent of (and stricter than) the hop-depth
+	// counter. It is set on every reason-only child's environment so a reason-only
+	// agent, which should only reason, cannot re-enter the bridge to spawn a
+	// grandchild — making "a reason-only finder can't delegate" a real guarantee
+	// rather than a property of whichever sandbox the backend happens to use.
+	noDelegateEnv = "AGENT_NO_DELEGATE"
 
 	// geminiTimeoutHeadroom is the extra wall-clock allowed beyond the requested
 	// timeout before agy is hard-killed, so agy's own --print-timeout fires first
@@ -378,6 +395,36 @@ func childHopEnv(env []string, depth int) []string {
 	return out
 }
 
+// delegationDisabled reports whether this server was spawned by a reason-only
+// parent that forbids any further delegation (AGENT_NO_DELEGATE=1). Only an
+// exact "1" counts, so a stray empty/other value never silently blocks calls.
+// Pure function — table-testable (pass a map-backed getenv).
+func delegationDisabled(getenv func(string) string) bool {
+	return strings.TrimSpace(getenv(noDelegateEnv)) == "1"
+}
+
+// childDelegationEnv returns a copy of env with any existing AGENT_NO_DELEGATE
+// entry REMOVED, then appends "AGENT_NO_DELEGATE=1" iff the spawned child is
+// reason-only (allow_tools=false). A reason-only child must not delegate
+// further, so the flag rides its environment to any bridge server the child
+// itself launches, where delegationDisabled() makes runAgent refuse. An acting
+// child (allow_tools=true) gets no flag and may still delegate, bounded by the
+// hop guard. Pure function — table-testable.
+func childDelegationEnv(env []string, reasonOnly bool) []string {
+	prefix := noDelegateEnv + "="
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if reasonOnly {
+		out = append(out, noDelegateEnv+"=1")
+	}
+	return out
+}
+
 func main() {
 	s := server.NewMCPServer(
 		"agent-bridge-mcp",
@@ -411,7 +458,9 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 			mcp.Items(map[string]any{"type": "string"}),
 		),
 		mcp.WithString("working_dir",
-			mcp.Description("Directory the agent runs in (absolute path). Defaults to this server's working directory."),
+			mcp.Description("Directory the agent runs in (absolute path). Defaults to this server's own working "+
+				"directory — NOT necessarily the repo you want reviewed/edited — so set it explicitly when the agent "+
+				"must read or write a specific project (e.g. codex_agent's read-only mode resolves its file reads against this dir)."),
 		),
 		mcp.WithNumber("timeout_seconds",
 			mcp.Description(fmt.Sprintf("Max seconds to wait for the agent (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)),
@@ -490,6 +539,17 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 // with a nil Go error; only parent-context cancellation returns a Go error,
 // mirroring the original gemini_agent behavior.
 func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, error) {
+	// Reason-only freeze: a reason-only parent set AGENT_NO_DELEGATE, so this
+	// agent may not spawn any child (it should only reason, not act). Independent
+	// of — and stricter than — the hop-depth counter below.
+	if delegationDisabled(os.Getenv) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s: delegation disabled (%s=1). This agent was spawned reason-only by a parent "+
+				"agent and may not spawn further agents. Perform this task directly instead of delegating.",
+			b.tool, noDelegateEnv,
+		)), nil
+	}
+
 	// Loop guard: refuse to spawn a child once the delegation depth limit is
 	// reached, to prevent runaway A→B→A→B chains.
 	depth, hopMax := parseHopEnv(os.Getenv)
@@ -522,8 +582,10 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(o.workingDir) != "" {
 		cmd.Dir = o.workingDir
 	}
-	// Spawn the child with an incremented delegation depth (no duplicate keys).
-	cmd.Env = childHopEnv(os.Environ(), depth)
+	// Spawn the child with an incremented delegation depth (no duplicate keys),
+	// and — when this run is reason-only — with AGENT_NO_DELEGATE=1 so the child
+	// cannot re-enter the bridge to spawn a grandchild.
+	cmd.Env = childDelegationEnv(childHopEnv(os.Environ(), depth), !o.allowTools)
 
 	// Kill the whole process group on cancel/timeout (so grandchildren the child
 	// spawned die too) and bound how long Run may block on I/O afterward. Without

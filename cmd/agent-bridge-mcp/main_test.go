@@ -458,6 +458,144 @@ func TestChildHopEnv(t *testing.T) {
 	}
 }
 
+func TestDelegationDisabled(t *testing.T) {
+	tests := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "exact 1 disables", val: "1", want: true},
+		{name: "whitespace around 1 still disables", val: "  1 ", want: true},
+		{name: "unset is allowed", val: "", want: false},
+		{name: "zero is allowed (not a magic disable)", val: "0", want: false},
+		{name: "other truthy strings do not disable", val: "true", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getenv := func(k string) string {
+				if k == noDelegateEnv {
+					return tt.val
+				}
+				return ""
+			}
+			if got := delegationDisabled(getenv); got != tt.want {
+				t.Errorf("delegationDisabled(%q) = %v; want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChildDelegationEnv(t *testing.T) {
+	countND := func(env []string) int {
+		n := 0
+		for _, kv := range env {
+			if strings.HasPrefix(kv, noDelegateEnv+"=") {
+				n++
+			}
+		}
+		return n
+	}
+	tests := []struct {
+		name       string
+		env        []string
+		reasonOnly bool
+		wantFlag   bool // expect exactly one AGENT_NO_DELEGATE=1
+	}{
+		{
+			name:       "reason-only child gets the flag",
+			env:        []string{"PATH=/bin"},
+			reasonOnly: true,
+			wantFlag:   true,
+		},
+		{
+			name:       "acting child gets no flag",
+			env:        []string{"PATH=/bin"},
+			reasonOnly: false,
+			wantFlag:   false,
+		},
+		{
+			name:       "stale inherited flag is stripped for an acting child",
+			env:        []string{"PATH=/bin", noDelegateEnv + "=1", "HOME=/h"},
+			reasonOnly: false,
+			wantFlag:   false,
+		},
+		{
+			name:       "no duplicate flag when one is already present (reason-only)",
+			env:        []string{noDelegateEnv + "=1", "A=1"},
+			reasonOnly: true,
+			wantFlag:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := childDelegationEnv(tt.env, tt.reasonOnly)
+			n := countND(got)
+			if tt.wantFlag && (n != 1 || !argsContain(got, noDelegateEnv+"=1")) {
+				t.Errorf("childDelegationEnv(reasonOnly=%v) = %v; want exactly one %s=1", tt.reasonOnly, got, noDelegateEnv)
+			}
+			if !tt.wantFlag && n != 0 {
+				t.Errorf("childDelegationEnv(reasonOnly=%v) = %v; want no %s entry", tt.reasonOnly, got, noDelegateEnv)
+			}
+		})
+	}
+}
+
+func TestRunAgentNoDelegateRefuses(t *testing.T) {
+	// A reason-only parent froze delegation; runAgent must refuse before any spawn.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	t.Setenv(noDelegateEnv, "1")
+
+	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		t.Run(base.tool, func(t *testing.T) {
+			// resolveBin points at a path that would fail loudly if ever executed.
+			tb := withBin(t, base, "/nonexistent/should-not-run")
+			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+			if err != nil {
+				t.Fatalf("expected nil Go error (tool-level result), got %v", err)
+			}
+			if res == nil || !res.IsError {
+				t.Fatalf("expected an error result, got %+v", res)
+			}
+			txt := resultText(t, res)
+			if !strings.Contains(txt, base.tool) || !strings.Contains(txt, "delegation disabled") {
+				t.Errorf("no-delegate message missing tool name / disabled text: %q", txt)
+			}
+		})
+	}
+}
+
+func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
+	// A reason-only run must hand its child AGENT_NO_DELEGATE=1; an acting run must not.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	t.Setenv(noDelegateEnv, "") // this server is not itself frozen
+	// The fake echoes the flag it actually received in its environment.
+	bin := writeFakeBin(t, "#!/bin/sh\necho \"ND=[$"+noDelegateEnv+"]\"\n")
+
+	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		t.Run(base.tool, func(t *testing.T) {
+			tb := withBin(t, base, bin)
+
+			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+			if err != nil {
+				t.Fatalf("reason-only: unexpected Go error: %v", err)
+			}
+			if txt := resultText(t, res); !strings.Contains(txt, "ND=[1]") {
+				t.Errorf("reason-only child must see %s=1; got %q", noDelegateEnv, txt)
+			}
+
+			res, err = runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300, allowTools: true})
+			if err != nil {
+				t.Fatalf("allow_tools: unexpected Go error: %v", err)
+			}
+			if txt := resultText(t, res); !strings.Contains(txt, "ND=[]") {
+				t.Errorf("acting child must NOT see %s; got %q", noDelegateEnv, txt)
+			}
+		})
+	}
+}
+
 func TestResolveBinAgyEnvOverride(t *testing.T) {
 	// AGY_BIN override takes top priority and is reachable without network.
 	t.Setenv("AGY_BIN", "/custom/path/to/agy")
