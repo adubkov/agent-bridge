@@ -670,14 +670,14 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if runCtx.Err() == context.DeadlineExceeded {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s timed out after %s (%s).\nPartial stdout:\n%s\nstderr:\n%s",
-			b.tool, elapsed, modeNoteStr, truncate(stdout.String(), 8000), truncate(stderr.String(), 2000),
+			b.tool, elapsed, modeNoteStr, truncate(stdout.String(), 8000), truncateTail(stderr.String(), 2000),
 		)), nil
 	}
 
 	if runErr != nil {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s failed (%s): %v\nstderr:\n%s\nstdout:\n%s",
-			b.tool, modeNoteStr, runErr, truncate(stderr.String(), 4000), truncate(stdout.String(), 8000),
+			b.tool, modeNoteStr, runErr, truncateTail(stderr.String(), 4000), truncate(stdout.String(), 8000),
 		)), nil
 	}
 
@@ -685,7 +685,7 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(out) == "" {
 		out = fmt.Sprintf("(%s returned no stdout)", b.cliName)
 		if se := strings.TrimSpace(stderr.String()); se != "" {
-			out += "\nstderr:\n" + truncate(se, 2000)
+			out += "\nstderr:\n" + truncateTail(se, 2000)
 		}
 	}
 
@@ -710,4 +710,25 @@ func truncate(s string, limit int) string {
 		i--
 	}
 	return s[:i] + fmt.Sprintf("\n…(truncated, %d bytes total)", len(s))
+}
+
+// truncateTail returns a copy of s truncated to at most limit bytes by keeping the
+// END of the string (without splitting UTF-8 runes). Use it for child stderr: a
+// CLI's real error lands at the TAIL — e.g. codex echoes the whole prompt to stderr
+// first and prints the actual error (a usage limit, an auth failure) last — so
+// head-truncation would discard exactly the line you need. Negative limit → 0.
+func truncateTail(s string, limit int) string {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(s) <= limit {
+		return s
+	}
+	// Keep the last `limit` bytes, advancing to a valid UTF-8 rune boundary so the
+	// kept slice never starts mid-rune (continuation bytes are 10xxxxxx).
+	start := len(s) - limit
+	for start < len(s) && (s[start]&0xC0 == 0x80) {
+		start++
+	}
+	return fmt.Sprintf("…(truncated, %d bytes total)\n", len(s)) + s[start:]
 }

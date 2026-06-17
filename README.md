@@ -277,6 +277,13 @@ before install. `codex plugin add` then snapshots the whole plugin — skills + 
 binary — into a **frozen** cache (`~/.codex/plugins/cache/.../`) and wires up the MCP server
 itself: **no separate `codex mcp add`**, and the install doesn't track your checkout.
 
+> **Use `make install-codex`, not a bare `codex plugin add`.** Only the Codex manifests
+> (`.codex-plugin/plugin.json`, `.mcp.json`) are committed; the `skills/` and the
+> `agent-bridge-mcp` binary they reference are **gitignored** and materialized by the make
+> target. Running `codex plugin marketplace add . && codex plugin add …` by hand on a fresh
+> clone (without `make install-codex` first) registers a plugin whose declared skills and MCP
+> binary are missing.
+
 ## Build (Makefile)
 
 ```sh

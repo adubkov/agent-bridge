@@ -164,6 +164,15 @@ serializes tool calls still runs them all, just one after another.
 | `timeout_seconds` | 300–600 depending on diff size. |
 | `working_dir` / `add_dirs` | leave unset — the embedded diff is the intended input. |
 
+> **Keep `codex_agent` scoped.** Its reason-only mode is an *agentic* `--sandbox read-only`
+> run, not a no-tools mode (unlike `gemini_agent` / `claude_agent`, which genuinely cannot
+> read files): if you set `working_dir`/`add_dirs` or tell it to "consult the repo," it will
+> read files and can wander a large tree — slow, and it can burn its usage quota mid-review.
+> For the finder/verifier passes leave `working_dir` unset and keep the "reason only over the
+> inline diff" line in the prompt. Route to a repo-reading `codex_agent` (with `working_dir`
+> set) only for a *specific* finding that genuinely needs out-of-diff context — see
+> "Diff-scoped reviewers" below.
+
 Give every model the **same brief** so the diversity comes from the model, not the
 prompt. (You can layer distinct angles later; start uniform.)
 
@@ -173,6 +182,8 @@ prompt. (You can layer distinct angles later; start uniform.)
 > CORRECTNESS bugs (logic errors, wrong conditions, off-by-one, nil/undefined,
 > missing error handling, concurrency hazards, broken call sites). Be specific:
 > name the trigger and the wrong result. Do not nitpick style.
+> **Reason only over the inline diff — do NOT read files, list directories, or run
+> commands; everything you need is below.**
 > Return **ONLY** a JSON array (max 8) of objects:
 > `{"file": "...", "line": "...", "severity": "HIGH|MEDIUM|LOW", "summary": "...", "why": "concrete inputs/state → wrong result"}`.
 > No prose outside the JSON. If you find nothing, return `[]`.
@@ -199,6 +210,7 @@ that serializes tool calls the two waves still hold but wall-clock is the sum.
 **Verifier prompt template:**
 
 > Another reviewer flagged this finding in the diff below. Decide if it is real.
+> **Reason only over the inline diff — do NOT read files or run commands.**
 > Answer with ONLY one JSON object:
 > `{"verdict": "CONFIRMED|PLAUSIBLE|REFUTED", "reason": "quote the line that proves it"}`.
 > CONFIRMED = you can name the trigger and wrong result. PLAUSIBLE = mechanism is

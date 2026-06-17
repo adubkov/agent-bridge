@@ -104,6 +104,31 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestTruncateTail(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "shorter than max", in: "hello", max: 10, want: "hello"},
+		{name: "equal to max", in: "hello", max: 5, want: "hello"},
+		{name: "longer ascii keeps the TAIL", in: "hello world", max: 5, want: "…(truncated, 11 bytes total)\nworld"},
+		{name: "utf-8 safe: tail starts on a rune boundary, drops the partial rune", in: "ab€cd", max: 4, want: "…(truncated, 7 bytes total)\ncd"},
+		{name: "empty string", in: "", max: 5, want: ""},
+		{name: "zero limit keeps nothing but the marker", in: "hello", max: 0, want: "…(truncated, 5 bytes total)\n"},
+		{name: "negative limit treated as zero", in: "hello", max: -1, want: "…(truncated, 5 bytes total)\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateTail(tt.in, tt.max)
+			if got != tt.want {
+				t.Errorf("truncateTail(%q, %d) = %q; want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildClaudeArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -618,6 +643,33 @@ func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
 				t.Errorf("acting child must NOT see %s; got %q", noDelegateEnv, txt)
 			}
 		})
+	}
+}
+
+func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
+	// A failing child whose REAL error is at the END of a long stderr (like codex,
+	// which echoes the whole prompt first, then prints the actual error — e.g. a
+	// usage-limit message — last). The failure result must keep the TAIL so that
+	// error stays visible, instead of head-truncating it away.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	// ~6.9 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
+	bin := writeFakeBin(t, "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxx\\n' 1>&2; i=$((i+1)); done\nprintf 'REAL-ERROR-AT-END\\n' 1>&2\nexit 1\n")
+	tb := withBin(t, geminiBackend, bin)
+
+	res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Fatalf("expected an error result, got %+v", res)
+	}
+	txt := resultText(t, res)
+	if !strings.Contains(txt, "REAL-ERROR-AT-END") {
+		t.Errorf("failure result dropped the tail error (head-truncated?); got:\n%s", txt)
+	}
+	if !strings.Contains(txt, "truncated,") {
+		t.Errorf("expected a truncation marker for the long stderr; got:\n%s", txt)
 	}
 }
 
