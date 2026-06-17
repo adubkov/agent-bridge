@@ -28,7 +28,9 @@ runs to completion with a controlling TTY; spawned with plain pipes it **hangs**
 hard kill, burning the whole timeout. The bridge therefore runs the agy backend under a pty
 (`needsPTY` + `runOnPTY` in [proc_pty_unix.go](cmd/agent-bridge-mcp/proc_pty_unix.go)).
 `claude`/`codex` are built for headless `--print`/`exec` and use plain pipes — do **not** add
-a pty for them. When touching `runOnPTY`: keep the goroutine drain + grace-period
+a pty for them. On a build without pty support (non-unix), the dispatch **refuses** a
+`needsPTY` backend up front instead of falling through to pipes and hanging — keep that
+guard. When touching `runOnPTY`: keep the goroutine drain + grace-period
 force-close of the master (a synchronous `io.Copy` before `Wait` deadlocks if a grandchild
 escapes the process-group kill and holds the slave open), and keep `cleanPTYOutput` (strip
 ANSI/CR so results stay parseable). Under a pty stdout+stderr **merge**, so error/timeout
