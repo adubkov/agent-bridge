@@ -133,8 +133,10 @@ even when you disagree with them.
 
 ### 1. Gather the diff
 
-Run it yourself (`git diff @{upstream}...HEAD`, `git diff main...HEAD`, or a PR/
-path the user named) and **embed the diff text inline, verbatim** in each finder's
+Run it yourself — and gather it with **`git diff --function-context`** (`-W`) so each hunk
+carries its *whole enclosing function*, not just the default ±3 lines (e.g. `git diff
+--function-context @{upstream}...HEAD`, `git diff -W main...HEAD`, or a PR/path the user
+named). Then **embed the diff text inline, verbatim** in each finder's
 `task` — do **not** summarize, paraphrase, or truncate it. A lossy diff makes
 finders flag phantom issues (e.g. a section that only *looks* missing because you
 trimmed it) and miss real ones. Embedding keeps the review self-contained and
@@ -148,6 +150,27 @@ and command execution, and nothing wires the repo in. `codex_agent` reason-only 
 hand it the diff inline so all finders judge the same scoped input.) If the diff is
 very large, narrow scope by dropping *whole files* — never by compressing the diff
 text.
+
+**How much context to embed — the ladder.** A bare `git diff` (±3 lines) catches *local*
+bugs but is blind to anything outside the hunk; widen the context to fit the stakes:
+
+1. **`git diff --function-context` (the default above)** — whole changed functions, no repo
+   access needed. Kills most "I can't see the rest of the function" misses at near-zero cost.
+   Start here.
+2. **Full changed *files*** — embed the entire files the diff touches when same-file
+   callers/helpers matter, or to check *completeness* (e.g. a new struct field whose handling
+   `switch` is unchanged, and therefore invisible in a hunk).
+3. **Repo-reading `codex_agent`** (`working_dir` set) — the only way to see *cross-file*
+   callers, type definitions, and guards. Most powerful, but it is an agentic read-only run
+   that can wander the tree and burn quota, so use it as a **targeted escalation** for a
+   *specific* finding that needs it (see "Diff-scoped reviewers" in step 3), not the default
+   pass.
+
+Two different blind spots, two different fixes. Missing **code** context — callers, guards,
+the rest of a function, type defs, completeness — is fixed by climbing this ladder. Missing
+**external/runtime** knowledge — how a CLI, library, or framework actually behaves — is *not*
+fixed by any amount of context; only a reviewer that already has that knowledge catches it,
+which is why cross-family **model diversity** matters as much as context depth.
 
 ### 2. Fan out finders (reason-only, in parallel)
 
