@@ -47,6 +47,8 @@ func TestCleanPTYOutput(t *testing.T) {
 		{"strip SGR color", "\x1b[31mred\x1b[0m", "red"},
 		{"strip cursor/clear", "a\x1b[2K\x1b[1Gb", "ab"},
 		{"strip OSC title (BEL-terminated)", "\x1b]0;my title\x07done", "done"},
+		{"strip OSC title (ST-terminated)", "\x1b]0;my title\x1b\\done", "done"},
+		{"strip colon-delimited truecolor SGR", "\x1b[38:2:255:128:0mc\x1b[0m", "c"},
 		{"normalize CRLF", "line1\r\nline2", "line1\nline2"},
 		{"drop bare CR", "abc\rdef", "abcdef"},
 		{

@@ -76,6 +76,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -765,6 +766,16 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	// them open and cmd.Run() hangs past the deadline, leaking the goroutine/fds.
 	cmd.WaitDelay = childWaitDelay
 
+	// A pty-required backend (agy) hangs forever on plain pipes, so on a build with no
+	// pty support refuse up front instead of falling through to the pipe path and
+	// burning the entire timeout on a guaranteed hang.
+	if b.needsPTY && !ptySupported {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s requires a pseudo-terminal, which this build does not support (GOOS=%s); refusing rather than hanging on plain pipes.",
+			b.tool, runtime.GOOS,
+		)), nil
+	}
+
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
 	var runErr error
@@ -817,12 +828,14 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 }
 
 // ansiEscapeRE matches the terminal control sequences a CLI emits when it thinks
-// it is driving a TTY: CSI sequences (colors, cursor moves, line clears), OSC
-// sequences (window-title sets, terminated by BEL), and the remaining two-byte
-// escapes. A pty-run backend's output is laced with these; we strip them so the
-// result the model receives is plain text (e.g. parseable JSON), matching what the
-// pipe-run backends already return.
-var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07]*\x07|\x1b[@-_]")
+// it is driving a TTY: CSI sequences (colors, cursor moves, line clears — the
+// parameter class is the full ECMA-48 range 0x30-0x3F, so colon-delimited truecolor
+// SGR like ESC[38:2:r:g:bm is covered, not just the semicolon form), OSC sequences
+// (window-title sets, terminated by either BEL or ST = ESC \), and the remaining
+// two-byte escapes. A pty-run backend's output is laced with these; we strip them so
+// the result the model receives is plain text (e.g. parseable JSON), matching what
+// the pipe-run backends already return.
+var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[@-_]")
 
 // cleanPTYOutput turns raw pseudo-terminal output into plain text: it strips ANSI
 // escape sequences and normalizes the TTY's CRLF / bare-CR line endings to LF.
