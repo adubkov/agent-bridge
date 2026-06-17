@@ -169,8 +169,11 @@ Read the templates' "broken call sites" and "guarded elsewhere (quote the guard)
 scoped to what the diff shows: a diff-only verifier that can't find a guard should
 answer **PLAUSIBLE**, not REFUTED — a guard it can't see is not proof there is none.
 When out-of-diff context is essential to a verdict, route that finding to a
-repo-reading reviewer (`codex_agent`, whose reason-only `--sandbox read-only` mode
-already reads the repo).
+repo-reading reviewer — `codex_agent` in reason-only (`--sandbox read-only`) mode can
+read the repo, but **only if you point it there**: set `working_dir` to the repo root
+(and `add_dirs` for any extra trees). Left unset, the spawned `codex` inherits the
+bridge server's own working directory — not the repo under review — so it may not see
+the files at all.
 
 ### 4. Synthesize
 
@@ -214,8 +217,13 @@ needs two things in place:
 
 - **Claude Code:** `make install-claude` (tools only) or `make plugin-install`
   (tools + skills).
-- **Antigravity (Gemini, via the `agy` CLI):** `make install-agy` (or
-  `agy plugin install <repo>`) — imports the MCP server *and* this skill.
+- **Antigravity (Gemini, via the `agy` CLI):** `make install-agy` — imports the MCP
+  server *and* this skill. Use the make target, not a bare `agy plugin install
+  <repo>`: `agy` copies the plugin manifests but not the built binary and does not
+  expand Claude's `${CLAUDE_PLUGIN_ROOT}`, so the imported MCP command still points
+  at an unexpanded `${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp` path and the server won't
+  launch until it is repointed at the absolute binary — which is exactly the extra
+  step `make install-agy` performs.
 - **Codex:** `codex mcp add agent-bridge -- /abs/path/to/agent-bridge-mcp`
   (Codex supports external stdio MCP servers).
 
@@ -228,14 +236,15 @@ Antigravity host on `claude_agent` + `codex_agent`).
 
 - **Claude Code / Antigravity:** loaded as a skill by the plugin install above —
   it triggers from the `description`.
-- **Codex:** Codex has a plugin/marketplace system (`codex plugin marketplace add`
-  + `codex plugin add`) that mirrors this repo's local marketplace, but it does not
-  surface Claude-format *skills* the way Claude Code / Antigravity do. The reliable
-  path is
-  to drop this playbook into Codex's standing-instructions file (`AGENTS.md`, per
-  project or `~/.codex/AGENTS.md`), or to paste the steps as the task prompt.
-  Nothing host-specific is required to *follow* the pipeline — it is just the steps
-  above plus the bridge tools.
+- **Codex:** Codex *does* have a plugin/marketplace system (`codex plugin
+  marketplace add` + `codex plugin add`), but it expects a **Codex-format** plugin
+  (`.codex-plugin/plugin.json` plus Codex marketplace entries) and **cannot consume
+  this repo's Claude-format `.claude-plugin/` marketplace** — so it will not surface
+  this skill. Register the bridge tools the MCP way (`codex mcp add …` above), and
+  carry the playbook by dropping it into Codex's standing-instructions file
+  (`AGENTS.md`, per project or `~/.codex/AGENTS.md`) or pasting the steps as the task
+  prompt. Nothing host-specific is required to *follow* the pipeline — it is just the
+  steps above plus the bridge tools.
 
 ## Caveats
 
@@ -253,7 +262,8 @@ Antigravity host on `claude_agent` + `codex_agent`).
   reason-only is a `--sandbox read-only` mode, so it *can* already read the repo and
   run read-only commands; you still give it the diff inline for a uniform, scoped
   input. If a finding genuinely needs wider context: with `codex_agent`, reason-only
-  already permits repo reads; `gemini_agent` / `claude_agent` have **no read-only
+  already permits repo reads (point it at the repo with `working_dir`, else it reads
+  the bridge server's own directory); `gemini_agent` / `claude_agent` have **no read-only
   sandbox tier** like codex's, so `allow_tools: true` is the only way to let them act
   — it grants *full unattended execution* (`--dangerously-skip-permissions`: file
   writes + arbitrary commands), so reach for it sparingly and scope it with
