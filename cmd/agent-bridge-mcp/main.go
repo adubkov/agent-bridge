@@ -653,7 +653,7 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 		case modeRead:
 			if !b.supportsReadOnly() {
 				return mcp.NewToolResultError(fmt.Sprintf(
-					"%s: no read-only mode — use mode \"reason\" (no tools) or \"act\" (full access). "+
+					"%s: no read-only mode — use mode \"reason\" (no unattended edits/commands) or \"act\" (full access). "+
 						"Only claude_agent and codex_agent have a read-only tier.", b.tool)), nil
 			}
 			o.readOnly = true
