@@ -346,24 +346,28 @@ was a single-model review.
 
 ## Output format
 
-A ranked list (table or JSON), each row: `file:line · SEVERITY · summary ·
-found-by:<model> · verified-by:<model>:<verdict>`. Lead with a one-line note of which
-models participated and at what tier/effort (and any user overrides) — each spawn's result
-header reports the `model=… effort=…` the bridge resolved and passed to the CLI, so report
-that, not your intent (it's the value sent, not proof the CLI honored it — see above).
+You already hold every finding as JSON — the finder arrays and verifier verdicts you
+collected — plus each spawn's wall-clock in its result header. **Render that as Markdown
+tables, not prose bullets — one table per wave** (don't dump raw JSON at the user):
 
-**Report per-agent timing.** Every spawn's result header ends with that run's wall-clock —
-the full shape is `[<tool> | <mode-note> | model=… effort=… tier=… | <elapsed>]`, e.g.
-`[claude_agent | … | model=opus effort=xhigh tier=deep | 7m35.515s]`. So you already have an
-exact duration for every finder and verifier — don't time anything yourself, just read the
-last header field. Surface it: a per-reviewer table above the findings
-(`agent · model · effort · time · #findings` for finders, and each verifier's `time` next to
-its verdict), plus the wall-clock of each wave (≈ the slowest finder, then ≈ the slowest
-verifier — since each wave is one `parallel_agents` call; it would be the sum of every call
-if you ran them individually). This makes each
-model's cost/latency concrete and lets the user trade tier or Fast mode against time on the
-next run. (agy's latency is especially variable — see Caveats — so its measured time is worth
-showing.)
+- **Wave 1 — finders:** one row per deduped finding (collapse same file+line+mechanism into one
+  row, keeping the most concrete `why`), ordered HIGH → LOW. Columns: `file:line` (the finder's
+  `file` + `line` combined for display), `severity`, `summary`, `why`, and the `found-by` model.
+- **Wave 2 — cross-verify:** one row per Wave-1 finding (reuse its number). Columns: the
+  `verifier` model (always ≠ the finder), its `verdict`, the `reason`, and that verifier's
+  `time`. A REFUTED row stays in the table so its adjudication is visible, but is dropped from
+  the gate — per Cross-verify above, only CONFIRMED/PLAUSIBLE survive. In **Fast mode** there is
+  no Wave-2 table — say so explicitly, and flag that the findings carry no independent cross-check.
+
+Above those two tables, give a **per-reviewer summary table** for the finder wave
+(`agent · model · effort · time · #findings`) and a one-line note of which models participated
+at what tier/effort (and any user overrides). Report the `model=… effort=…` from each spawn's
+result header (the value the bridge resolved and sent to the CLI — not your intent, and not
+proof the CLI honored it), and pull every `time` straight from that header's last field (shape
+`[<tool> | <mode> | model=… effort=… tier=… | <elapsed>]`) — don't time anything yourself. Give
+each wave's wall-clock too (≈ the slowest finder, then ≈ the slowest verifier — each wave is one
+`parallel_agents` call; it would be the sum if you ran them individually). agy's latency is
+especially variable (see Caveats), so its measured time is worth showing.
 
 ## Using this from Claude Code, Antigravity, or Codex
 
