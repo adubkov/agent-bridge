@@ -399,7 +399,19 @@ func resolveTier(b backend, tier, reqModel, reqEffort string,
 	}
 	if strings.TrimSpace(model) == "" {
 		if len(spec.modelMatch) > 0 {
+			// A discovery-based tier (agy) MUST resolve to a concrete model. If it can't
+			// — `<cli> models` failed, or its output no longer matches modelMatch — do NOT
+			// silently fall through to the CLI default: the caller asked for a specific
+			// tier (e.g. a "deep" Pro model) and would otherwise get an unflagged default
+			// while the result header still reports tier=deep. Fail loud so they can pass
+			// an explicit `model`, omit `tier`, or fix the match.
 			model = discover(spec.modelMatch)
+			if strings.TrimSpace(model) == "" {
+				return "", "", fmt.Errorf(
+					"tier %q: could not resolve a model for %s (no `%s` entry matching %q) — "+
+						"pass an explicit `model`, or omit `tier`",
+					tier, b.cliName, strings.Join(b.modelListCmd, " "), strings.Join(spec.modelMatch, " "))
+			}
 		} else {
 			model = spec.model
 		}
@@ -415,9 +427,10 @@ func resolveTier(b backend, tier, reqModel, reqEffort string,
 var modelCache sync.Map // key: cliName + "\x00" + join(match); val: string
 
 // discoverModel runs the backend's modelListCmd and returns the model name matching
-// `match` (see pickModel), memoized. Returns "" on any error/miss so the caller falls
-// back to the CLI default. NOT pure (spawns a subprocess) — deliberately kept out of
-// buildArgs so that stays table-testable.
+// `match` (see pickModel), memoized. Returns "" on any error/miss; resolveTier turns an
+// empty result for a discovery-based tier into a clear error rather than silently using
+// the CLI default. NOT pure (spawns a subprocess) — deliberately kept out of buildArgs
+// so that stays table-testable.
 func (b backend) discoverModel(ctx context.Context, match []string) string {
 	if len(b.modelListCmd) == 0 || len(match) == 0 {
 		return ""
@@ -870,31 +883,11 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 			workingDir:     req.GetString("working_dir", ""),
 		}
 
-		// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
-		// model/effort params override per-field; for agy the tier's model name is
-		// discovered from `agy models` at runtime. Backends with no presets reject it.
-		if tier := strings.ToLower(strings.TrimSpace(req.GetString("tier", ""))); tier != "" {
-			if len(b.tiers) == 0 {
-				return mcp.NewToolResultError(fmt.Sprintf(
-					"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool)), nil
-			}
-			// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
-			// tier model discovery shells out to `agy models`, and a child that will be
-			// refused at spawn time must not run any subprocess first.
-			if res := delegationGuard(b.tool); res != nil {
-				return res, nil
-			}
-			discover := func(match []string) string { return b.discoverModel(ctx, match) }
-			model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
-			if terr != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr)), nil
-			}
-			o.model, o.effort, o.tier = model, effort, tier
-		}
-
 		// Resolve the access tier from the `mode` enum (reason | read | act); an
 		// omitted/blank mode means reason. `read` is rejected for backends with no
-		// read-only tier (antigravity).
+		// read-only tier (antigravity). Validated BEFORE the tier block below so an
+		// invalid request (e.g. agy + read) is rejected up front, without first shelling
+		// out to `<cli> models` for tier model discovery.
 		mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "")))
 		if mode == "" {
 			mode = modeReason
@@ -914,6 +907,29 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 		default:
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode)), nil
+		}
+
+		// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
+		// model/effort params override per-field; for agy the tier's model name is
+		// discovered from `agy models` at runtime. Backends with no presets reject it.
+		if tier := strings.ToLower(strings.TrimSpace(req.GetString("tier", ""))); tier != "" {
+			if len(b.tiers) == 0 {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool)), nil
+			}
+			// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
+			// tier model discovery shells out to `agy models`, and a child that will be
+			// refused at spawn time must not run any subprocess first. (mode is already
+			// validated above, so an invalid mode never reaches this discovery either.)
+			if res := delegationGuard(b.tool); res != nil {
+				return res, nil
+			}
+			discover := func(match []string) string { return b.discoverModel(ctx, match) }
+			model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
+			if terr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr)), nil
+			}
+			o.model, o.effort, o.tier = model, effort, tier
 		}
 
 		// sandbox defaults OFF and is antigravity-only. --sandbox applies agy's

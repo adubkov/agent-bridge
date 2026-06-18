@@ -253,3 +253,28 @@ func TestCheckServe(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckAuthStreams(t *testing.T) {
+	t.Run("stderr noise does not corrupt the stdout JSON parse", func(t *testing.T) {
+		// A warning on stderr plus valid auth JSON on stdout. With CombinedOutput the
+		// merged stream would fail json.Unmarshal (and, since exit==0, report "unknown");
+		// capturing stdout separately must parse cleanly to "yes".
+		const json = `{"checks":{"auth":{"credentials":{"category":"auth","status":"ok","summary":"auth is configured"}}}}`
+		b := withBin(t, codexBackend, writeFakeBin(t,
+			"#!/bin/sh\necho 'warning: ignored notice' >&2\nprintf '%s\\n' '"+json+"'\n"))
+		authed, detail := b.checkAuth(context.Background(), 10*time.Second)
+		if authed != "yes" || !strings.Contains(detail, "configured") {
+			t.Errorf("got (%q,%q); want (yes, ...configured) — stderr must not break the JSON parse", authed, detail)
+		}
+	})
+	t.Run("stderr-only failure still yields a detail", func(t *testing.T) {
+		// Empty stdout, error text on stderr, non-zero exit: the detail falls back to
+		// stderr so a hard failure is not reported with an empty note.
+		b := withBin(t, codexBackend, writeFakeBin(t,
+			"#!/bin/sh\necho 'codex: command not found' >&2\nexit 1\n"))
+		authed, detail := b.checkAuth(context.Background(), 10*time.Second)
+		if authed != "no" || !strings.Contains(detail, "not found") {
+			t.Errorf("got (%q,%q); want (no, ...not found) from the stderr fallback", authed, detail)
+		}
+	})
+}

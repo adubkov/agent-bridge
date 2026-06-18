@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -120,6 +121,14 @@ func listAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	}
 	wg.Wait()
 
+	// If the request was canceled while the probes ran, the per-backend helpers folded
+	// the cancellation into per-backend detail strings rather than surfacing it (e.g.
+	// checkServe returns firstLine(err.Error())). Report the cancellation to the caller
+	// instead of returning a normal — and now partial/misleading — JSON result.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	out, err := json.MarshalIndent(results, "", "  ")
 	if err != nil { // should not happen for this struct
 		return mcp.NewToolResultError(fmt.Sprintf("list_agents: failed to encode results: %v", err)), nil
@@ -157,14 +166,26 @@ func (b backend) checkAuth(ctx context.Context, timeout time.Duration) (authed, 
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// Harden the spawn like runAgent: WaitDelay + a process-group kill so a stray
-	// grandchild that inherits the pipes can't keep CombinedOutput blocked past the
-	// context deadline.
+	// grandchild that inherits the pipes can't keep the run blocked past the deadline.
 	cmd := exec.CommandContext(cctx, b.resolveBin(), b.authCheck...)
 	cmd.WaitDelay = childWaitDelay
 	setupProcessGroup(cmd)
-	out, err := cmd.CombinedOutput()
+	// Capture stdout and stderr SEPARATELY (not CombinedOutput): the auth parsers run
+	// json.Unmarshal on this output, and `claude auth status --json` / `codex doctor
+	// --json` write their JSON to stdout — a stray warning merged in from stderr would
+	// make the parse fail and report a false "no"/"unknown". Parse stdout; fall back to
+	// stderr only when stdout is empty, so a hard failure that printed only to stderr
+	// still yields a meaningful detail.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if cctx.Err() == context.DeadlineExceeded {
 		return "unknown", fmt.Sprintf("auth check timed out after %s", timeout)
+	}
+	out := stdout.Bytes()
+	if len(bytes.TrimSpace(out)) == 0 {
+		out = stderr.Bytes()
 	}
 	return b.authParse(out, err)
 }

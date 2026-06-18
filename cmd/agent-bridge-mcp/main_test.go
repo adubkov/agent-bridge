@@ -1219,6 +1219,13 @@ func TestMakeHandlerParsing(t *testing.T) {
 		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "invalid mode") {
 			t.Errorf("invalid mode should be rejected; got %q", resultText(t, res))
 		}
+		// mode is validated BEFORE the tier block: agy + read + tier is rejected on the
+		// read-only-mode error and never reaches `agy models` discovery (which, with the
+		// echo fake, would otherwise fail to match and yield a "could not resolve" error).
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read", "tier": "deep"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
+			t.Errorf("agy read+tier should be rejected on mode before tier discovery; got %q", resultText(t, res))
+		}
 	})
 
 	t.Run("effort: claude --effort, codex -c model_reasoning_effort, antigravity ignores", func(t *testing.T) {
@@ -1600,6 +1607,24 @@ func TestResolveTier(t *testing.T) {
 		_, _, err := resolveTier(claudeBackend, "turbo", "", "", fakeDiscover)
 		if err == nil || !strings.Contains(err.Error(), "invalid tier") {
 			t.Errorf("want invalid-tier error; got %v", err)
+		}
+	})
+	t.Run("discovery-based tier resolving no model errors (no silent default)", func(t *testing.T) {
+		emptyDiscover := func(match []string) string { return "" }
+		_, _, err := resolveTier(antigravityBackend, "deep", "", "", emptyDiscover)
+		if err == nil || !strings.Contains(err.Error(), "could not resolve a model") {
+			t.Errorf("want could-not-resolve error when discovery yields no model; got %v", err)
+		}
+	})
+	t.Run("explicit model bypasses failed discovery", func(t *testing.T) {
+		called := false
+		emptyDiscover := func(match []string) string { called = true; return "" }
+		m, _, err := resolveTier(antigravityBackend, "deep", "Some Model", "", emptyDiscover)
+		if err != nil || m != "Some Model" {
+			t.Errorf("explicit model should win without erroring; got (%q,%v)", m, err)
+		}
+		if called {
+			t.Error("discovery must not run when model is given explicitly")
 		}
 	})
 }
