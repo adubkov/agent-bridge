@@ -11,7 +11,7 @@ PLUGIN      := agent-bridge
 # mcp_config.json at it. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex smoke-list-agents install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
+.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex smoke-list-agents smoke-parallel install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). The install-* targets copy this freshly built binary
@@ -64,6 +64,15 @@ smoke-list-agents: build
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents","arguments":{"probe":"installed"}}}' \
 	| ./$(BINARY) | grep -q installed && echo "smoke-list-agents OK" || (echo "smoke-list-agents FAILED"; exit 1)
+
+## smoke-parallel: smoke-test the parallel_agents fan-out tool — runs two claude reason
+##                 jobs concurrently and checks both job dividers appear (needs claude authed)
+smoke-parallel: build
+	@printf '%s\n' \
+	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"parallel_agents","arguments":{"jobs":[{"agent":"claude_agent","mode":"reason","tier":"fast","task":"Reply with exactly the word: PONG"},{"agent":"claude_agent","mode":"reason","tier":"fast","task":"Reply with exactly the word: PONG"}]}}}' \
+	| ./$(BINARY) | grep -q "job 1: claude_agent" && echo "smoke-parallel OK" || (echo "smoke-parallel FAILED"; exit 1)
 
 ## install-claude: register this repo as a local marketplace and install the plugin into
 ##                 Claude Code (loads the skills AND the agent-bridge MCP server).

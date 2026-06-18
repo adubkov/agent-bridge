@@ -795,6 +795,7 @@ func main() {
 		s.AddTool(newTool(b), makeHandler(b))
 	}
 	s.AddTool(listAgentsTool(), listAgentsHandler)
+	s.AddTool(parallelAgentsTool(), parallelAgentsHandler)
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-bridge-mcp: server error: %v\n", err)
@@ -853,102 +854,346 @@ func newTool(b backend) mcp.Tool {
 	return mcp.NewTool(b.tool, opts...)
 }
 
-// makeHandler returns the MCP handler for a backend. The `sandbox` param is read
-// from the request only for backends that support it (b.supportsSandbox()).
+// jobInput is the raw, pre-validation parameters of a single spawn, sourced from
+// either a tool request (makeHandler) or one entry of parallel_agents' `jobs` array.
+// buildRunOpts validates and resolves it to a runOpts, so both entry points share a
+// single source of truth for mode/tier/sandbox handling.
+type jobInput struct {
+	task           string
+	mode           string
+	tier           string
+	model          string
+	effort         string
+	sandbox        bool
+	workingDir     string
+	addDirs        []string
+	timeoutSeconds int // 0 → default
+}
+
+// buildRunOpts validates a jobInput against a backend and resolves it to a runOpts.
+// On any validation failure it returns a non-nil MCP error result (and a zero
+// runOpts); callers must check the result first. It may shell out to `<cli> models`
+// (agy tier discovery), so it takes a context and is gated by delegationGuard before
+// doing so.
+func buildRunOpts(ctx context.Context, b backend, in jobInput) (runOpts, *mcp.CallToolResult) {
+	task := strings.TrimSpace(in.task)
+	if task == "" {
+		return runOpts{}, mcp.NewToolResultError("`task` is required and must be a non-empty string")
+	}
+
+	timeoutSeconds := defaultTimeoutSeconds
+	if in.timeoutSeconds > 0 {
+		timeoutSeconds = in.timeoutSeconds
+	}
+	if timeoutSeconds > maxTimeoutSeconds {
+		timeoutSeconds = maxTimeoutSeconds
+	}
+
+	o := runOpts{
+		task:           task,
+		timeoutSeconds: timeoutSeconds,
+		model:          strings.TrimSpace(in.model),
+		effort:         strings.TrimSpace(in.effort),
+		workingDir:     in.workingDir,
+	}
+
+	// Resolve the access tier from the `mode` enum (reason | read | act); an
+	// omitted/blank mode means reason. `read` is rejected for backends with no
+	// read-only tier (antigravity). Validated BEFORE the tier block below so an
+	// invalid request (e.g. agy + read) is rejected up front, without first shelling
+	// out to `<cli> models` for tier model discovery.
+	mode := strings.ToLower(strings.TrimSpace(in.mode))
+	if mode == "" {
+		mode = modeReason
+	}
+	switch mode {
+	case modeReason:
+		// defaults: allowTools=false, readOnly=false
+	case modeRead:
+		if !b.supportsReadOnly() {
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+				"%s: no read-only mode — use mode \"reason\" (no unattended edits/commands) or \"act\" (full access). "+
+					"Only claude_agent and codex_agent have a read-only tier.", b.tool))
+		}
+		o.readOnly = true
+	case modeAct:
+		o.allowTools = true
+	default:
+		return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+			"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode))
+	}
+
+	// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
+	// model/effort params override per-field; for agy the tier's model name is
+	// discovered from `agy models` at runtime. Backends with no presets reject it.
+	if tier := strings.ToLower(strings.TrimSpace(in.tier)); tier != "" {
+		if len(b.tiers) == 0 {
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+				"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool))
+		}
+		// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
+		// tier model discovery shells out to `agy models`, and a child that will be
+		// refused at spawn time must not run any subprocess first. (mode is already
+		// validated above, so an invalid mode never reaches this discovery either.)
+		if res := delegationGuard(b.tool); res != nil {
+			return runOpts{}, res
+		}
+		discover := func(match []string) string { return b.discoverModel(ctx, match) }
+		model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
+		if terr != nil {
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr))
+		}
+		o.model, o.effort, o.tier = model, effort, tier
+	}
+
+	// sandbox defaults OFF and is antigravity-only. --sandbox applies agy's
+	// "terminal restrictions" but does NOT confine file edits (a write under it
+	// still lands in working_dir, verified), so it is not a write guard — to keep
+	// agy off your files use a throwaway working_dir. Backends without a sandbox
+	// concept (claude/codex) ignore it.
+	if b.supportsSandbox() {
+		o.sandbox = in.sandbox
+	}
+
+	for _, d := range in.addDirs {
+		if s := strings.TrimSpace(d); s != "" {
+			o.addDirs = append(o.addDirs, s)
+		}
+	}
+
+	return o, nil
+}
+
+// makeHandler returns the MCP handler for a backend: it extracts the request params
+// into a jobInput, resolves them via buildRunOpts (shared with parallel_agents), and
+// runs the spawn. The `sandbox` param is read only for backends that support it.
 func makeHandler(b backend) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Check context cancellation before executing.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-
-		task := strings.TrimSpace(req.GetString("task", ""))
-		if task == "" {
-			return mcp.NewToolResultError("`task` is required and must be a non-empty string"), nil
-		}
-
-		timeoutSeconds := defaultTimeoutSeconds
-		if v := req.GetInt("timeout_seconds", 0); v > 0 {
-			timeoutSeconds = v
-		}
-		if timeoutSeconds > maxTimeoutSeconds {
-			timeoutSeconds = maxTimeoutSeconds
-		}
-
-		o := runOpts{
-			task:           task,
-			timeoutSeconds: timeoutSeconds,
-			model:          strings.TrimSpace(req.GetString("model", "")),
-			effort:         strings.TrimSpace(req.GetString("effort", "")),
+		in := jobInput{
+			task:           req.GetString("task", ""),
+			mode:           req.GetString("mode", ""),
+			tier:           req.GetString("tier", ""),
+			model:          req.GetString("model", ""),
+			effort:         req.GetString("effort", ""),
 			workingDir:     req.GetString("working_dir", ""),
+			addDirs:        req.GetStringSlice("add_dirs", nil),
+			timeoutSeconds: req.GetInt("timeout_seconds", 0),
 		}
-
-		// Resolve the access tier from the `mode` enum (reason | read | act); an
-		// omitted/blank mode means reason. `read` is rejected for backends with no
-		// read-only tier (antigravity). Validated BEFORE the tier block below so an
-		// invalid request (e.g. agy + read) is rejected up front, without first shelling
-		// out to `<cli> models` for tier model discovery.
-		mode := strings.ToLower(strings.TrimSpace(req.GetString("mode", "")))
-		if mode == "" {
-			mode = modeReason
-		}
-		switch mode {
-		case modeReason:
-			// defaults: allowTools=false, readOnly=false
-		case modeRead:
-			if !b.supportsReadOnly() {
-				return mcp.NewToolResultError(fmt.Sprintf(
-					"%s: no read-only mode — use mode \"reason\" (no unattended edits/commands) or \"act\" (full access). "+
-						"Only claude_agent and codex_agent have a read-only tier.", b.tool)), nil
-			}
-			o.readOnly = true
-		case modeAct:
-			o.allowTools = true
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf(
-				"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode)), nil
-		}
-
-		// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
-		// model/effort params override per-field; for agy the tier's model name is
-		// discovered from `agy models` at runtime. Backends with no presets reject it.
-		if tier := strings.ToLower(strings.TrimSpace(req.GetString("tier", ""))); tier != "" {
-			if len(b.tiers) == 0 {
-				return mcp.NewToolResultError(fmt.Sprintf(
-					"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool)), nil
-			}
-			// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
-			// tier model discovery shells out to `agy models`, and a child that will be
-			// refused at spawn time must not run any subprocess first. (mode is already
-			// validated above, so an invalid mode never reaches this discovery either.)
-			if res := delegationGuard(b.tool); res != nil {
-				return res, nil
-			}
-			discover := func(match []string) string { return b.discoverModel(ctx, match) }
-			model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
-			if terr != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr)), nil
-			}
-			o.model, o.effort, o.tier = model, effort, tier
-		}
-
-		// sandbox defaults OFF and is antigravity-only. --sandbox applies agy's
-		// "terminal restrictions" but does NOT confine file edits (a write under it
-		// still lands in working_dir, verified), so it is not a write guard — to keep
-		// agy off your files use a throwaway working_dir. claude has no sandbox
-		// concept, so the param is not read.
 		if b.supportsSandbox() {
-			o.sandbox = req.GetBool("sandbox", false)
+			in.sandbox = req.GetBool("sandbox", false)
 		}
-
-		for _, d := range req.GetStringSlice("add_dirs", nil) {
-			if s := strings.TrimSpace(d); s != "" {
-				o.addDirs = append(o.addDirs, s)
-			}
+		o, errRes := buildRunOpts(ctx, b, in)
+		if errRes != nil {
+			return errRes, nil
 		}
-
 		return runAgent(ctx, b, o)
 	}
+}
+
+// maxParallelJobs caps how many spawns one parallel_agents call may request — a
+// backstop against a runaway fan-out, since each job is a full CLI + model spawn.
+const maxParallelJobs = 32
+
+const parallelAgentsToolName = "parallel_agents"
+
+const parallelAgentsDescription = "Run several agent spawns CONCURRENTLY in a single call and return all their " +
+	"results. Provide `jobs`: a non-empty array of {agent, task, ...} objects, where `agent` is one of " +
+	"antigravity_agent | claude_agent | codex_agent and the other fields mirror that agent's own params (task, mode, " +
+	"tier, model, effort, sandbox, working_dir, add_dirs, timeout_seconds). The bridge runs the jobs as parallel " +
+	"goroutines so they genuinely overlap — prefer this over issuing many separate agent tool calls, because MCP host " +
+	"clients (Claude Code, Codex, Antigravity) dispatch individual tool calls SERIALLY, so N separate calls run " +
+	"back-to-back (wall-clock = sum) while parallel_agents runs them at once (wall-clock ≈ the slowest). Each job " +
+	"reuses the same per-backend semantics, the delegation hop-guard, and the reason/read no-delegate freeze as " +
+	"calling the agent directly. Results are returned in job order, each under a `===== job N: <agent> =====` divider " +
+	"with the agent's usual `[agent | mode | model… | elapsed]` header. Validation is all-or-nothing: a malformed or " +
+	"unknown-agent job fails the whole call before any spawn. `max_concurrency` caps simultaneous spawns (default: " +
+	"all jobs at once)."
+
+// parallelAgentsTool defines the server-side fan-out tool. Its parallelism lives in
+// the bridge process (goroutines), so it is unaffected by host MCP clients that
+// serialize individual tool-call dispatch.
+func parallelAgentsTool() mcp.Tool {
+	jobSchema := map[string]any{
+		"type":     "object",
+		"required": []string{"agent", "task"},
+		"properties": map[string]any{
+			"agent":           map[string]any{"type": "string", "enum": []string{"antigravity_agent", "claude_agent", "codex_agent"}, "description": "Which agent to spawn."},
+			"task":            map[string]any{"type": "string", "description": "The complete, self-contained task for this agent."},
+			"mode":            map[string]any{"type": "string", "description": "reason | read | act (per-backend; antigravity has no read). Default reason."},
+			"tier":            map[string]any{"type": "string", "description": "Reviewer tier deep | fast → model+effort (server-resolved)."},
+			"model":           map[string]any{"type": "string", "description": "Optional model override."},
+			"effort":          map[string]any{"type": "string", "description": "Optional reasoning effort (claude/codex)."},
+			"sandbox":         map[string]any{"type": "boolean", "description": "antigravity_agent only; see its sandbox caveats."},
+			"working_dir":     map[string]any{"type": "string", "description": "Directory the agent runs in (absolute path)."},
+			"add_dirs":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Extra workspace dirs (absolute paths)."},
+			"timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Per-job timeout (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)},
+		},
+	}
+	return mcp.NewTool(parallelAgentsToolName,
+		mcp.WithDescription(parallelAgentsDescription),
+		mcp.WithArray("jobs",
+			mcp.Required(),
+			mcp.Description("Agent spawns to run concurrently; each is a {agent, task, ...} object."),
+			mcp.Items(jobSchema),
+		),
+		mcp.WithNumber("max_concurrency",
+			mcp.Description("Maximum spawns running at once (default: all jobs; values < 1 mean no limit)."),
+		),
+	)
+}
+
+// backendByTool finds a backend by its MCP tool name.
+func backendByTool(tool string) (backend, bool) {
+	for _, b := range backends {
+		if b.tool == tool {
+			return b, true
+		}
+	}
+	return backend{}, false
+}
+
+// job-map accessors: parallel_agents' jobs arrive as generic JSON objects
+// (map[string]any), so each field is read defensively. JSON numbers decode to float64.
+func jobStr(m map[string]any, key string) string { s, _ := m[key].(string); return s }
+func jobBool(m map[string]any, key string) bool  { b, _ := m[key].(bool); return b }
+func jobInt(m map[string]any, key string) int {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+func jobStrSlice(m map[string]any, key string) []string {
+	raw, ok := m[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// parallelAgentsHandler validates every job up front (all-or-nothing), then spawns
+// them concurrently (bounded by max_concurrency) and returns their outputs in job order.
+func parallelAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	// The fan-out is itself a spawn from this process; if delegation is frozen
+	// (reason-only child) or at the hop limit, every job would be refused — say so once.
+	if res := delegationGuard(parallelAgentsToolName); res != nil {
+		return res, nil
+	}
+
+	rawJobs, ok := req.GetArguments()["jobs"].([]any)
+	if !ok || len(rawJobs) == 0 {
+		return mcp.NewToolResultError("`jobs` is required and must be a non-empty array of {agent, task, ...} objects"), nil
+	}
+	if len(rawJobs) > maxParallelJobs {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"too many jobs (%d); maximum is %d per call", len(rawJobs), maxParallelJobs)), nil
+	}
+
+	type plan struct {
+		b     backend
+		o     runOpts
+		agent string
+	}
+	plans := make([]plan, len(rawJobs))
+	for i, rj := range rawJobs {
+		m, ok := rj.(map[string]any)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("jobs[%d] must be an object", i)), nil
+		}
+		agent := strings.TrimSpace(jobStr(m, "agent"))
+		b, ok := backendByTool(agent)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"jobs[%d]: unknown agent %q — use antigravity_agent | claude_agent | codex_agent", i, agent)), nil
+		}
+		in := jobInput{
+			task:           jobStr(m, "task"),
+			mode:           jobStr(m, "mode"),
+			tier:           jobStr(m, "tier"),
+			model:          jobStr(m, "model"),
+			effort:         jobStr(m, "effort"),
+			workingDir:     jobStr(m, "working_dir"),
+			addDirs:        jobStrSlice(m, "add_dirs"),
+			timeoutSeconds: jobInt(m, "timeout_seconds"),
+		}
+		if b.supportsSandbox() {
+			in.sandbox = jobBool(m, "sandbox")
+		}
+		o, errRes := buildRunOpts(ctx, b, in)
+		if errRes != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("jobs[%d] (%s): %s", i, agent, toolResultText(errRes))), nil
+		}
+		plans[i] = plan{b: b, o: o, agent: agent}
+	}
+
+	// Concurrency cap: default to all jobs at once; a positive max_concurrency lowers it.
+	limit := len(plans)
+	if mc := req.GetInt("max_concurrency", 0); mc > 0 && mc < limit {
+		limit = mc
+	}
+	sem := make(chan struct{}, limit)
+
+	texts := make([]string, len(plans))
+	failed := make([]bool, len(plans))
+	var wg sync.WaitGroup
+	for i := range plans {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			res, err := runAgent(ctx, plans[i].b, plans[i].o)
+			if err != nil {
+				// Only parent-context cancellation returns a Go error from runAgent.
+				texts[i] = fmt.Sprintf("(canceled: %v)", err)
+				failed[i] = true
+				return
+			}
+			texts[i] = toolResultText(res)
+			failed[i] = res.IsError
+		}(i)
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	errCount := 0
+	for _, f := range failed {
+		if f {
+			errCount++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("parallel_agents: %d job(s), max_concurrency=%d, %d reported error(s).\n",
+		len(plans), limit, errCount))
+	for i := range plans {
+		sb.WriteString(fmt.Sprintf("\n===== job %d: %s =====\n", i, plans[i].agent))
+		sb.WriteString(texts[i])
+		if !strings.HasSuffix(texts[i], "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 // delegationGuard returns a non-nil error result when this process must refuse to spawn

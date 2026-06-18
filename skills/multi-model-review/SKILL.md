@@ -215,11 +215,18 @@ inline agy finder can still edit files there. Prefer the repo-reading recipe abo
 throwaway worktree — over inline for agy; only run agy inline when the bridge server's cwd is
 not a tree you care about.)
 
-### 2. Fan out finders (read-only, in parallel)
+### 2. Fan out finders (read-only, in parallel via `parallel_agents`)
 
-For each reviewer model, call its tool with the finder prompt below. **Issue them in a
-single message** — a host that runs independent tool calls concurrently (e.g. Claude Code)
-fans them out in parallel; a host that serializes still runs them all, one after another.
+Run all the finders in **one `parallel_agents` call** — one `jobs` entry per reviewer
+model, each `{"agent": "<claude_agent|codex_agent|antigravity_agent>", ...the fields
+below}`. The bridge runs them as concurrent goroutines, so wall-clock ≈ the slowest
+finder. **Do not issue a separate tool call per reviewer:** every MCP host client (Claude
+Code, Codex, Antigravity — all verified) dispatches individual tool calls **serially**, so
+N separate calls run back-to-back (wall-clock = the *sum*). Only if `parallel_agents`
+isn't available, fall back to one call per reviewer in a single message — correct, but
+serial on every host.
+
+Each `jobs` entry carries the same fields you'd pass that agent directly:
 
 | Param | Repo-reading (default) | Inline (fallback) |
 |---|---|---|
@@ -267,14 +274,16 @@ Pool all candidates and assign each a **verifier model ≠ the finder model**
 (round-robin across the participating models: e.g. gemini→claude, claude→codex,
 codex→gemini; with two models, just use the other; with only one model connected you
 cannot cross-verify at all — use Fast mode and report it as a single-model review).
-Then **dispatch every verifier call in a single message**, using the same read-only
-repo-reading recipe as the finders (or inline, matching whatever the finders used).
+Then run the whole verifier wave as **one `parallel_agents` call** (one `jobs` entry per
+finding), using the same read-only repo-reading recipe as the finders (or inline, matching
+whatever the finders used).
 
-This is a **two-wave** pipeline: all finders, then all verifiers. The one
-unavoidable wait is *between* the waves — a finding can't be verified before it
-exists. On a host that dispatches tool calls concurrently (e.g. Claude Code) each
-wave runs in parallel, so total time ≈ slowest finder + slowest verifier; on a host
-that serializes tool calls the two waves still hold but wall-clock is the sum.
+This is a **two-wave** pipeline: all finders, then all verifiers. The one unavoidable wait
+is *between* the waves — a finding can't be verified before it exists. With each wave
+issued as a single `parallel_agents` call, the jobs within a wave truly overlap, so total
+time ≈ slowest finder + slowest verifier. (Issuing the calls individually instead serializes
+them on **every** host — wall-clock becomes the sum — which is why each wave is one
+`parallel_agents` call.)
 
 **Verifier prompt template (repo-reading default):**
 
@@ -325,8 +334,8 @@ the same pass — review-then-fix keeps a human-auditable step.
 
 ## Fast mode (finders only, no cross-verify)
 
-Skip cross-verification entirely: run the finder wave (step 2) — in parallel if more
-than one model is connected — then dedup and synthesize directly. This is **one wave
+Skip cross-verification entirely: run the finder wave (step 2) — as one `parallel_agents`
+call when more than one model is connected — then dedup and synthesize directly. This is **one wave
 — the fastest possible run**, but you lose the adversarial cross-check (a finding
 only earns confidence by surviving a *different* model's refutation), so expect more
 false positives. Reach for it for a low-stakes multi-model sanity sweep, or as the
@@ -350,7 +359,8 @@ exact duration for every finder and verifier — don't time anything yourself, j
 last header field. Surface it: a per-reviewer table above the findings
 (`agent · model · effort · time · #findings` for finders, and each verifier's `time` next to
 its verdict), plus the wall-clock of each wave (≈ the slowest finder, then ≈ the slowest
-verifier on a concurrent host; the sum of every call on a serializing host). This makes each
+verifier — since each wave is one `parallel_agents` call; it would be the sum of every call
+if you ran them individually). This makes each
 model's cost/latency concrete and lets the user trade tier or Fast mode against time on the
 next run. (agy's latency is especially variable — see Caveats — so its measured time is worth
 showing.)

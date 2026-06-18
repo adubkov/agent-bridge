@@ -8,7 +8,7 @@
 
 A tiny [MCP](https://modelcontextprotocol.io) server that bridges coding agents,
 exposing each as a spawnable sub-agent tool. One binary registers three sub-agent
-tools plus a `list_agents` discovery tool:
+tools plus a `list_agents` discovery tool and a `parallel_agents` fan-out tool:
 
 - **`antigravity_agent`** — shells out to the Antigravity CLI (`agy --print <task>`),
   i.e. spawns an **Antigravity** (Gemini) sub-agent. Intended to be called from a Claude session.
@@ -19,6 +19,11 @@ tools plus a `list_agents` discovery tool:
 - **`list_agents`** — read-only discovery: reports which backends are installed (and,
   on request, authed or able to serve a request), so a caller can pick its sub-agent
   set before fanning out. Takes no task — it inspects the host, it doesn't spawn an agent.
+- **`parallel_agents`** — runs several sub-agent spawns **concurrently** in one call and
+  returns all their results. Needed because MCP host clients (Claude Code, Codex,
+  Antigravity) dispatch individual tool calls **serially**, so issuing N separate
+  sub-agent calls runs them back-to-back; `parallel_agents` fans them out as goroutines
+  inside this server, so wall-clock ≈ the slowest job, not the sum.
 
 A parent agent calls a tool with a self-contained task; this server shells out to
 the corresponding CLI, lets the child agent perform it, and returns the child's
@@ -107,6 +112,27 @@ Each entry carries `{tool, cli, installed, path, source}`; the `auth` probe adds
 (`yes`/`no`/`unknown`) + `detail`, and `serve` adds `ready` + `latency_ms`. `auth` and
 `serve` shell out, so they are refused for a reason-only (`AGENT_NO_DELEGATE`) child;
 `installed` is always allowed.
+
+## Tool: `parallel_agents`
+
+Runs several sub-agent spawns **concurrently** in a single call and returns all their
+results in job order. Use it instead of issuing many separate sub-agent tool calls:
+**MCP host clients dispatch individual tool calls serially** (verified for Claude Code,
+Codex, and Antigravity — each waits for one call to finish before sending the next), so N
+separate calls run back-to-back (wall-clock = sum). `parallel_agents` runs the jobs as
+goroutines inside this server, so they genuinely overlap (wall-clock ≈ the slowest job).
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `jobs` | array | *(required)* | Non-empty list (max 32) of `{agent, task, …}` objects. `agent` is one of `antigravity_agent` / `claude_agent` / `codex_agent`; the other fields mirror that agent's own params (`task`, `mode`, `tier`, `model`, `effort`, `sandbox`, `working_dir`, `add_dirs`, `timeout_seconds`). |
+| `max_concurrency` | number | all jobs | Cap on simultaneous spawns (values < 1 mean no cap). |
+
+Each job reuses the **same** per-backend semantics, the loop guard, and the reason/read
+no-delegate freeze as calling the agent directly, and returns under a `===== job N:
+<agent> =====` divider with the agent's usual `[agent | mode | model… | elapsed]` header.
+Validation is **all-or-nothing**: a malformed or unknown-agent job fails the whole call
+before any spawn. (`parallel_agents` is itself a spawn from this server, so it is refused
+for a reason-only `AGENT_NO_DELEGATE` child or at the hop-depth limit.)
 
 ### Safety model (all tools)
 

@@ -10,6 +10,12 @@ the user-facing docs and [skills/](skills/) for the playbooks.
 The server also registers a **`list_agents`** discovery tool (takes no `task` — it
 never spawns a worker; but probe depth scales cost: `installed` no-spawn,
 `auth`/`serve` shell out; see [discover.go](cmd/agent-bridge-mcp/discover.go)) and a
+**`parallel_agents`** fan-out tool (`parallelAgentsHandler`): one call runs a list of
+`jobs` as concurrent goroutines and returns them in order — the host-agnostic way to get
+real parallelism, since MCP host clients (Claude Code/Codex/agy, all verified) dispatch
+individual tool calls **serially**. It shares per-job validation with `makeHandler` via
+`buildRunOpts` (single source of truth for mode/tier/sandbox) and reuses `runAgent`'s
+hop-guard + no-delegate freeze. The server also exposes a
 **`tier`** param (`deep`/`fast`) that resolves model+effort per backend as registry data
 (`tiers`/`tierSpec`) — for agy the model is discovered from `agy models` at runtime
 (`discoverModel`, process-cached), claude/codex carry explicit presets. The pure
