@@ -941,6 +941,16 @@ func buildRunOpts(ctx context.Context, b backend, in jobInput) (runOpts, *mcp.Ca
 		discover := func(match []string) string { return b.discoverModel(ctx, match) }
 		model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
 		if terr != nil {
+			// discoverModel shells out to `<cli> models` under the request context; if
+			// that context was canceled/expired mid-probe, resolveTier just sees an empty
+			// model and reports "could not resolve a model" — a misleading validation
+			// message for what is really a cancellation. Surface the context error so the
+			// caller sees the true cause. (The inner 10s discovery cap firing while the
+			// request context is still live is NOT this case: ctx.Err() is nil there, so a
+			// genuine resolution failure is still reported as such.)
+			if ctx.Err() != nil {
+				return runOpts{}, mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, ctx.Err()))
+			}
 			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr))
 		}
 		o.model, o.effort, o.tier = model, effort, tier

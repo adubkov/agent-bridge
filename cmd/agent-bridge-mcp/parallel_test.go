@@ -138,6 +138,33 @@ func TestBuildRunOpts(t *testing.T) {
 		}
 	})
 
+	t.Run("canceled context during tier discovery surfaces ctx error, not resolution failure", func(t *testing.T) {
+		clearDelegationEnv(t)
+		// A discovery-based tier backend with a unique cliName so it can't pick up a
+		// model another test cached. With the request context already canceled, the
+		// `<cli> models` probe fails and resolveTier would report "could not resolve a
+		// model" — buildRunOpts must surface the cancellation as the real cause instead.
+		probe := backend{
+			tool:         "cancel_probe_agent",
+			cliName:      "cancel-probe-nonexistent-cli",
+			modelListCmd: []string{"models"},
+			tiers:        map[string]tierSpec{"deep": {modelMatch: []string{"Pro"}}},
+		}
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, res := buildRunOpts(cctx, probe, jobInput{task: "x", tier: "deep"})
+		if res == nil || !res.IsError {
+			t.Fatalf("want an error result for a canceled request, got %v", toolResultText(res))
+		}
+		msg := toolResultText(res)
+		if strings.Contains(msg, "could not resolve a model") {
+			t.Fatalf("cancellation misreported as a resolution failure: %q", msg)
+		}
+		if !strings.Contains(msg, context.Canceled.Error()) {
+			t.Fatalf("want the context-canceled cause surfaced, got %q", msg)
+		}
+	})
+
 	t.Run("tier rejected when backend has no presets", func(t *testing.T) {
 		clearDelegationEnv(t)
 		none := backend{tool: "x_agent"} // no tiers, no read-only, no sandbox
