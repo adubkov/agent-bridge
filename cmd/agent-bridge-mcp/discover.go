@@ -207,7 +207,7 @@ func parseCodexAuth(out []byte, runErr error) (authed, detail string) {
 		return "unknown", "unparseable codex doctor output"
 	}
 	var statuses []string
-	var summary string
+	var summary, failSummary string
 	var walk func(n any)
 	walk = func(n any) {
 		switch t := n.(type) {
@@ -215,10 +215,17 @@ func parseCodexAuth(out []byte, runErr error) (authed, detail string) {
 			if cat, _ := t["category"].(string); cat == "auth" {
 				st, _ := t["status"].(string)
 				statuses = append(statuses, st)
+				s, _ := t["summary"].(string)
 				if summary == "" {
-					if s, ok := t["summary"].(string); ok {
-						summary = s
-					}
+					summary = s
+				}
+				// Capture a FAILING node's summary separately. The verdict below is "no"
+				// if ANY auth check is non-ok, and map values walk in randomized order, so
+				// reporting the first-seen (possibly "ok") summary on the "no" path can
+				// contradict the verdict (e.g. authed="no", detail="auth is configured").
+				// Tie the "no" detail to a node that actually failed.
+				if st != "ok" && failSummary == "" && s != "" {
+					failSummary = s
 				}
 			}
 			for _, v := range t {
@@ -236,6 +243,9 @@ func parseCodexAuth(out []byte, runErr error) (authed, detail string) {
 	}
 	for _, st := range statuses {
 		if st != "ok" {
+			if failSummary != "" {
+				return "no", failSummary
+			}
 			return "no", summary
 		}
 	}
@@ -253,6 +263,16 @@ func (b backend) checkServe(ctx context.Context, timeout time.Duration) (ready b
 	}
 	if b.supportsReadOnly() {
 		o.readOnly = true
+	} else {
+		// A backend with no read-only tier (agy) can edit files unattended in its working
+		// dir, and an unset working_dir runs it in the bridge SERVER's own cwd — often the
+		// user's project tree. A PONG round-trip needs no workspace, so run it in a throwaway
+		// temp dir to keep stray writes off the user's files (best-effort: if the temp dir
+		// can't be created, fall back to the prior behavior rather than skip the probe).
+		if dir, err := os.MkdirTemp("", "agent-bridge-serve-*"); err == nil {
+			o.workingDir = dir
+			defer os.RemoveAll(dir)
+		}
 	}
 	start := time.Now()
 	res, err := runAgent(ctx, b, o)

@@ -344,7 +344,11 @@ CLIs are present and skips the rest.
 
 ### `antigravity_agent`
 
-Reason-only (safe default):
+Reason-only (the default mode) — note `agy` has **no** write-safe tier: unlike
+`claude_agent` / `codex_agent`, its `reason` mode does not block file edits, and an
+omitted `working_dir` runs it in the bridge server's own cwd. For a self-contained
+question like this that's fine; to point it at a real tree, pass a throwaway
+`working_dir` to keep stray writes off your files:
 
 ```json
 { "task": "Review this Go error-handling pattern and suggest improvements: ..." }

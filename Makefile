@@ -105,9 +105,9 @@ install-agy: build
 	else \
 	  echo "WARNING: $(AGY_PLUGIN_DIR) not found; agy plugin layout may differ (pass AGY_PLUGIN_DIR=...)."; \
 	fi
-	@cfg='$(AGY_PLUGIN_DIR)/mcp_config.json'; \
+	@cfg="$(AGY_PLUGIN_DIR)/mcp_config.json"; \
 	if [ -f "$$cfg" ]; then \
-	  repl=$$(printf '%s' '$(AGY_PLUGIN_DIR)/$(BINARY)' | sed 's/[&\\#]/\\&/g'); \
+	  repl=$$(printf '%s' "$(AGY_PLUGIN_DIR)/$(BINARY)" | sed 's/[&\\#]/\\&/g'); \
 	  sed 's#$${CLAUDE_PLUGIN_ROOT}/$(BINARY)#'"$$repl"'#' "$$cfg" > "$$cfg.tmp" && mv "$$cfg.tmp" "$$cfg" && \
 	  echo "repointed agy MCP command -> $(AGY_PLUGIN_DIR)/$(BINARY)"; \
 	else \

@@ -152,6 +152,19 @@ func TestParseCodexAuth(t *testing.T) {
 			t.Errorf("got %q; want no", a)
 		}
 	})
+	t.Run("mixed ok+fail -> no with the FAILING node's detail", func(t *testing.T) {
+		// Two auth checks, one ok one error. Map values walk in randomized order, so the
+		// "no" detail must come from a node that actually failed — never the ok node's
+		// summary (which would contradict the verdict). Run repeatedly to defeat ordering luck.
+		const mixed = `{"checks":{"auth":{"creds":{"category":"auth","status":"ok","summary":"auth is configured"},` +
+			`"token":{"category":"auth","status":"error","summary":"token expired"}}}}`
+		for i := 0; i < 50; i++ {
+			a, d := parseCodexAuth([]byte(mixed), nil)
+			if a != "no" || d != "token expired" {
+				t.Fatalf("got (%q,%q); want (no, token expired) — detail must be the failing node's", a, d)
+			}
+		}
+	})
 	t.Run("no auth check -> unknown", func(t *testing.T) {
 		if a, _ := parseCodexAuth([]byte(noAuth), nil); a != "unknown" {
 			t.Errorf("got %q; want unknown", a)
