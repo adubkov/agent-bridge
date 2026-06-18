@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-bridge": {
+      "command": "./agent-bridge-mcp",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}

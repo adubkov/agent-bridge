@@ -1,0 +1,38 @@
+{
+  "name": "agent-bridge",
+  "version": "0.1.0",
+  "description": "Bidirectional agent bridge as an MCP server (antigravity_agent / claude_agent / codex_agent), plus skills for delegating to Antigravity and running cross-model code reviews.",
+  "author": {
+    "name": "Alexey Dubkov",
+    "email": "alexey@dubkov.com"
+  },
+  "repository": "https://github.com/adubkov/agent-bridge",
+  "keywords": [
+    "mcp",
+    "gemini",
+    "claude",
+    "codex",
+    "antigravity",
+    "agy",
+    "bridge",
+    "subagent",
+    "code-review"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agent Bridge",
+    "shortDescription": "Spawn Antigravity/Claude/Codex sub-agents; run cross-model reviews",
+    "longDescription": "Exposes antigravity_agent, claude_agent, and codex_agent as MCP tools so any host agent can spawn a sub-agent in another model family, and ships skills for delegating work to Antigravity (Gemini) and for running multi-model (cross-family) code reviews of a diff. Installing this plugin registers both the bundled MCP server and the skills.",
+    "developerName": "Alexey Dubkov",
+    "category": "Engineering",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Run a cross-model review of my current diff.",
+      "Delegate this task to an Antigravity sub-agent."
+    ]
+  }
+}

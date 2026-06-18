@@ -3,10 +3,10 @@
 //
 // Three tools are registered:
 //
-//   - gemini_agent — shells out to the Antigravity CLI (`agy --print <task>`),
-//     i.e. spawns a Gemini sub-agent. Intended to be called from a Claude session.
+//   - antigravity_agent — shells out to the Antigravity CLI (`agy --print <task>`),
+//     i.e. spawns an Antigravity (Gemini) sub-agent. Intended to be called from a Claude session.
 //   - claude_agent — shells out to the Claude CLI (`claude --print <task>`),
-//     i.e. spawns a Claude sub-agent. Intended to be called from a Gemini session.
+//     i.e. spawns a Claude sub-agent. Intended to be called from an Antigravity session.
 //   - codex_agent — shells out to the OpenAI Codex CLI (`codex exec <task>`),
 //     i.e. spawns a Codex sub-agent. Callable from any parent session.
 //
@@ -17,28 +17,55 @@
 // in-code registry (see `backends`), so adding another CLI coding-agent is one
 // entry, not new code.
 //
-// Safety: tool-use (the child editing files / running commands) is DISABLED by
-// default. In the default mode the server runs the CLI with no permission-bypass,
-// so the child can reason/answer but cannot take unattended actions. To let the
-// spawned agent actually edit files in working_dir, the caller sets
-// `allow_tools: true`:
-//   - gemini_agent passes --dangerously-skip-permissions to `agy`.
+// Access mode: the `mode` param selects the access tier — `reason` (default; no
+// permission-bypass — intended for reason/answer, but NOT a hard write-block for
+// every backend; see the agy caveat below), `read` (read-only
+// exploration), or `act` (full file edits + command execution, unattended). Acting
+// passes a permission-bypass flag:
+//   - antigravity_agent passes --dangerously-skip-permissions to `agy`.
 //   - claude_agent passes --dangerously-skip-permissions to `claude`.
 //   - codex_agent passes --dangerously-bypass-approvals-and-sandbox to `codex`.
 //
-// Scope it with `working_dir`. For gemini_agent the `--sandbox` flag is OFF by
-// default because it confines edits to an isolated scratch dir (set
-// `sandbox: true` only for a confined "compute but don't touch my files" run);
-// claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so
-// its default (`allow_tools: false`) runs it in a read-only sandbox
+// Read mode: claude_agent passes --permission-mode plan; codex_agent reuses its
+// --sandbox read-only; antigravity_agent has NO read tier.
+//
+// Scope read/act runs with `working_dir`. For antigravity_agent the `--sandbox` flag is
+// OFF by default; note it applies agy's "terminal restrictions" but does NOT keep file
+// edits out of `working_dir` (verified: a write under --sandbox landed in working_dir), so
+// it is not a "don't touch my files" guard — point `working_dir` at a throwaway dir to keep
+// agy off your files. claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
+// default (`mode: "reason"`/`"read"`) runs it in a read-only sandbox
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
+//
+// Reason tier — what does it actually restrict? Omitting the skip-perms flag is
+// MEANT to stop unattended writes/commands, and does for claude_agent (which also
+// passes `--tools ""` to hard-disable ALL built-in tools — a true no-tools run) and
+// codex_agent (whose `reason` is a `--sandbox read-only` sandbox). But it does NOT
+// stop a CLI from reading: both `claude --print` and `agy --print` auto-allow read
+// tools. And it does NOT stop agy from WRITING: agy has no tool-disabling flag and
+// does not gate writes behind skip-perms, so a `reason` antigravity_agent pointed at
+// a writable `working_dir` can still edit files unattended — and `--sandbox` does NOT
+// confine those edits (it is terminal restrictions only; a write under it still lands in
+// working_dir, verified). The only real guard is WHERE it runs: point `working_dir` at a
+// throwaway dir/worktree. Omitting `working_dir` is NOT a guard for agy — it then runs in
+// the bridge server's own cwd, which is often your project tree.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
 // (max allowed depth, default 2) from the environment. If the current depth has
 // reached the max, the tool returns an error instead of spawning a child.
 // Otherwise the child is spawned with AGENT_HOP_DEPTH incremented by one.
+//
+// Reason-only freeze: the hop guard bounds depth for AGENTS THAT ACT, but a
+// non-acting child should not delegate at all. So every non-acting child (mode
+// reason or read) is spawned with AGENT_NO_DELEGATE=1 in its environment;
+// any bridge server that child itself launches sees the flag and refuses to
+// spawn — a hard "no further delegation" stop that does not rely on the depth
+// counter. This matters for codex_agent (reason-only is a read-only sandbox that
+// can still run read-only commands) and antigravity_agent (reason-only still has
+// read tools — agy has no tool-disable flag), either of which could otherwise
+// re-enter the bridge; claude_agent reason-only has no tools at all (--tools "").
 package main
 
 import (
@@ -48,8 +75,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -66,11 +97,19 @@ const (
 	defaultHopMax   = 2
 	defaultHopDepth = 0
 
-	// geminiTimeoutHeadroom is the extra wall-clock allowed beyond the requested
+	// noDelegateEnv, when "1" in the environment, hard-blocks this server from
+	// spawning ANY child — independent of (and stricter than) the hop-depth
+	// counter. It is set on every reason-only child's environment so a reason-only
+	// agent, which should only reason, cannot re-enter the bridge to spawn a
+	// grandchild — making "a reason-only finder can't delegate" a real guarantee
+	// rather than a property of whichever sandbox the backend happens to use.
+	noDelegateEnv = "AGENT_NO_DELEGATE"
+
+	// antigravityTimeoutHeadroom is the extra wall-clock allowed beyond the requested
 	// timeout before agy is hard-killed, so agy's own --print-timeout fires first
 	// and surfaces its message. claude has no --print-timeout, so its backend uses
 	// zero headroom (the context deadline IS the timeout).
-	geminiTimeoutHeadroom = 30 * time.Second
+	antigravityTimeoutHeadroom = 30 * time.Second
 
 	// childWaitDelay bounds how long cmd.Run may block on stdout/stderr I/O after
 	// the child is killed, so a grandchild that inherited the pipes cannot hang the
@@ -84,66 +123,112 @@ const (
 type runOpts struct {
 	task           string
 	timeoutSeconds int
-	allowTools     bool
-	sandbox        bool // gemini-only boolean --sandbox; ignored by claude/codex
-	model          string
-	addDirs        []string
-	workingDir     string
+	// Access tier. The public `mode` param maps to these two capability axes
+	// (allowTools implies the ability to write/run; readOnly is read-but-not-write):
+	//   reason → both false   read → readOnly   act → allowTools.
+	allowTools bool
+	readOnly   bool
+	sandbox    bool // antigravity-only boolean --sandbox; ignored by claude/codex
+	model      string
+	effort     string // reasoning effort; claude --effort / codex -c model_reasoning_effort; ignored by antigravity
+	tier       string // resolved reviewer tier (deep/fast) for the result header; "" if none requested
+	addDirs    []string
+	workingDir string
 }
+
+// Access modes — the values of the `mode` param. reason = reason/answer only, no
+// tools (the default); read = read-only exploration (read/grep files, no edits or
+// effectful commands); act = full file edits + command execution (unattended).
+// Per backend: antigravity_agent has no `read` tier; codex_agent's reason and read are
+// both its `--sandbox read-only` (it has no pure no-tools mode).
+const (
+	modeReason = "reason"
+	modeRead   = "read"
+	modeAct    = "act"
+)
 
 // Model-facing tool descriptions. The prose differs per backend; the parameter
 // set is shared (see commonToolOptions) so the tool schemas can't drift.
 const (
-	geminiToolDescription = "Spawn a Gemini agent (via the Antigravity `agy` CLI) to perform a task and return its " +
-		"response. Give it a self-contained task in `task`; it runs non-interactively and returns Gemini's full " +
-		"output. By default the spawned agent can reason and answer but CANNOT take unattended actions (no file " +
-		"edits / command execution) — set `allow_tools: true` to let it act, which disables Gemini's permission " +
-		"prompts and runs it UNATTENDED, with edits landing in `working_dir`. Sandboxing is OFF by default; set " +
-		"`sandbox: true` to instead confine edits to an isolated scratch dir. Use `add_dirs` for workspace context " +
+	antigravityToolDescription = "Spawn an Antigravity agent (Google's `agy` CLI, which runs Gemini models) to perform a " +
+		"task and return its response. Give it a self-contained task in `task`; it runs non-interactively and returns " +
+		"the agent's full output. By default (`mode: \"reason\"`) it runs WITHOUT the permission-bypass flag and is meant " +
+		"to reason/answer — but agy has no tool-disable flag and does NOT gate writes, so a `reason` agent pointed at a " +
+		"writable `working_dir` can still read AND edit files unattended. `--sandbox` is terminal-restrictions only and does " +
+		"NOT keep edits out of `working_dir`, so to keep agy off your files point `working_dir` at a throwaway dir " +
+		"(omitting `working_dir` is NOT a guard — agy then runs in the bridge server's own cwd, often your project tree). " +
+		"Set `mode: \"act\"` to let it act, which " +
+		"disables agy's permission prompts and runs it UNATTENDED, with edits landing in `working_dir`. (antigravity_agent " +
+		"has no `read` tier — only `reason` or `act`.) Sandboxing is OFF by default. Use `add_dirs` for workspace context " +
 		"and `working_dir` to set where it runs."
 
 	claudeToolDescription = "Spawn a Claude agent (via the `claude` CLI) to perform a task and return its response. " +
 		"Give it a self-contained task in `task`; it runs non-interactively (`claude --print`) and returns Claude's " +
-		"full output. By default the spawned agent can reason and answer but CANNOT take unattended actions (no file " +
-		"edits / command execution) — set `allow_tools: true` to let it act, which passes --dangerously-skip-permissions " +
-		"so Claude auto-approves its own permission prompts and runs UNATTENDED (it will edit files / run commands and " +
-		"consume Claude credits without further confirmation). Use `add_dirs` for workspace context and `working_dir` " +
-		"to set where it runs. Note: even reason-only runs consume Claude credits."
+		"full output. By default (`mode: \"reason\"`) the spawned agent can reason and answer but CANNOT take " +
+		"unattended actions (no file edits / command execution). Set `mode: \"read\"` for read-only exploration " +
+		"(read/grep/glob the repo and run read-only commands like `git diff`, but no edits or effectful commands — " +
+		"passes --permission-mode plan), or `mode: \"act\"` to let it " +
+		"act, which passes --dangerously-skip-permissions so Claude auto-approves its own permission prompts and runs " +
+		"UNATTENDED (it will edit files / run commands and consume Claude credits without further confirmation). Use " +
+		"`add_dirs` for workspace context and `working_dir` to set where it runs. Set `effort` " +
+		"(low|medium|high|xhigh|max) to control reasoning effort. Note: even reason-only runs consume Claude credits."
 
-	geminiAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
-		"only). Use with care — this is unattended execution; scope it with working_dir."
+	antigravityModeDescription = "Access mode (default `reason`). `reason` = no permission-bypass flag — but agy has no " +
+		"tool-disabling flag and does NOT gate writes, so a `reason` agent with a writable working_dir may still read AND " +
+		"edit files unattended (`--sandbox` does NOT confine these writes — use a throwaway working_dir; omitting it just runs agy in the server's own cwd, often your project tree). `act` = edit files in working_dir + run commands " +
+		"UNATTENDED (passes --dangerously-skip-permissions). antigravity_agent has NO read-only tier, so `read` is " +
+		"rejected — use `reason` or `act`."
 
-	claudeAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"auto-approving its permission prompts (passes --dangerously-skip-permissions). Default false (reason/answer " +
-		"only). Use with care — this is unattended execution that consumes Claude credits; scope it with working_dir."
+	claudeModeDescription = "Access mode (default `reason`). `reason` = no tools (reason/answer only). `read` = " +
+		"read-only exploration: read/grep/glob files and run read-only commands like `git diff`, but no edits or " +
+		"effectful commands (passes --permission-mode plan). " +
+		"`act` = full edit + command execution UNATTENDED (passes --dangerously-skip-permissions; consumes credits). " +
+		"Scope `read`/`act` with working_dir."
 
 	codexToolDescription = "Spawn an OpenAI Codex agent (via the `codex` CLI, `codex exec`) to perform a task and return " +
 		"its response. Give it a self-contained task in `task`; it runs non-interactively and returns Codex's full " +
-		"output. By default (`allow_tools` false) the agent runs READ-ONLY (--sandbox read-only): it can read files " +
-		"and reason but CANNOT edit files or run effectful commands — note this is a read-only sandbox, not a pure " +
-		"no-tools mode. Set `allow_tools: true` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
+		"output. By default (`mode: \"reason\"` or `\"read\"` — both the same here) the agent runs READ-ONLY " +
+		"(--sandbox read-only): it can read files and reason but CANNOT edit files or run effectful commands — note " +
+		"this is a read-only sandbox, not a pure no-tools mode. Set `mode: \"act\"` to let it act, which passes --dangerously-bypass-approvals-and-sandbox " +
 		"so it runs UNATTENDED with full file/command access and NO sandbox, with edits landing in `working_dir`. Use " +
-		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Codex runs even outside a " +
+		"`add_dirs` for additional writable context and `working_dir` to set where it runs. Set `effort` (e.g. " +
+		"low|medium|high) to control reasoning effort (passed as `-c model_reasoning_effort`). Codex runs even outside a " +
 		"Git repo (--skip-git-repo-check is always passed). The tool returns Codex's final message; its session banner " +
 		"and step-by-step transcript go to stderr and are surfaced only if the run fails or times out."
 
-	codexAllowToolsDescription = "Allow the spawned agent to take actions (edit files in working_dir, run commands) by " +
-		"passing --dangerously-bypass-approvals-and-sandbox, which skips ALL approvals AND disables Codex's sandbox. " +
-		"Default false (read-only sandbox: reads/reasons, no writes). Use with care — this is fully unattended, " +
-		"unsandboxed execution; scope it with working_dir."
+	codexModeDescription = "Access mode (default `reason`). `reason` and `read` are BOTH read-only (--sandbox " +
+		"read-only): read files + run read-only commands, no writes — codex has no pure no-tools mode. `act` = full, " +
+		"unsandboxed file/command access (passes --dangerously-bypass-approvals-and-sandbox). Use with care; scope it " +
+		"with working_dir."
 
-	sandboxDescription = "Confine the agent to an isolated scratch dir with terminal restrictions (--sandbox). Default " +
-		"false. WARNING: when true, the agent's file edits go to a scratch dir, NOT working_dir — use only for a " +
-		"confined 'compute but don't touch my files' run."
+	sandboxDescription = "Enable agy's sandbox terminal restrictions (--sandbox). Default false. NOTE: despite the name " +
+		"this does NOT confine the agent's FILE edits — a write under --sandbox still lands in working_dir (verified), so it " +
+		"is not a 'don't touch my files' guard. To keep agy off your files, point working_dir at a throwaway dir (omitting it just runs agy in the server's own cwd, often your project tree — also not a guard). " +
+		"Antigravity-only."
+
+	claudeEffortDescription = "Optional reasoning effort for this run (passed as `--effort`). Accepts low | medium | " +
+		"high | xhigh | max. Leave empty for the model's default effort."
+
+	codexEffortDescription = "Optional reasoning effort for this run (passed as `-c model_reasoning_effort=<value>`). " +
+		"Accepts minimal | low | medium | high (model-dependent). Leave empty for the default effort."
 )
+
+// tierSpec is the model + reasoning effort a reviewer tier ("deep"/"fast") resolves
+// to for one backend. modelMatch is for backends with no stable model alias (agy):
+// the substrings identifying the tier's model in `<cli> models` output, resolved at
+// runtime (see discoverModel); when modelMatch is set, model is unused.
+type tierSpec struct {
+	model      string
+	effort     string
+	modelMatch []string
+}
 
 // backend declares one CLI adapter as DATA: the shared run/timeout/truncate/
 // header/context-cancel/hop-guard logic lives in runAgent, so adding a CLI
 // coding-agent is a single registry entry (see the registry below), not new code.
 // Optional flags (timeoutFlag, sandboxFlag) are "" when the CLI lacks them.
 type backend struct {
-	tool    string // MCP tool name, e.g. "gemini_agent"
+	tool    string // MCP tool name, e.g. "antigravity_agent"
 	cliName string // CLI binary name, e.g. "agy"; used for PATH/fallback lookup and the "(<cli> returned no stdout)" note
 	binEnv  string // env override for the CLI path, e.g. "AGY_BIN"
 
@@ -151,16 +236,23 @@ type backend struct {
 	// (e.g. ["exec"] for codex). nil for CLIs invoked as `<bin> [flags] <prompt>`.
 	subcmd []string
 
-	// Flag names. For flag-style CLIs (gemini/claude) promptFlag carries the task
+	// Flag names. For flag-style CLIs (antigravity/claude) promptFlag carries the task
 	// as its VALUE and is emitted FIRST; every other flag follows. "" means the CLI
 	// does not support that flag. When promptPositional is set the task is a
 	// trailing positional argument instead and promptFlag is unused.
 	promptFlag    string // "--print" (flag-style) | "" (positional, see promptPositional)
-	timeoutFlag   string // "--print-timeout" (gemini) | "" (claude/codex: ctx deadline only)
+	timeoutFlag   string // "--print-timeout" (antigravity) | "" (claude/codex: ctx deadline only)
 	modelFlag     string // "--model"
+	effortFlag    string // "--effort" (claude) | "" (codex uses effortConfigKey; antigravity has no effort lever)
 	addDirFlag    string // "--add-dir"
-	skipPermsFlag string // "--dangerously-skip-permissions" (gemini/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
-	sandboxFlag   string // "--sandbox" (gemini boolean) | "" (claude/codex)
+	skipPermsFlag string // "--dangerously-skip-permissions" (antigravity/claude) | "--dangerously-bypass-approvals-and-sandbox" (codex)
+	sandboxFlag   string // "--sandbox" (antigravity boolean) | "" (claude/codex)
+
+	// effortConfigKey carries reasoning effort via codex's `-c <key>=<value>` config
+	// form (effortConfigKey = "model_reasoning_effort") when the CLI has no dedicated
+	// effort FLAG. "" for backends that use effortFlag (claude) or have no effort lever
+	// (antigravity, where effort is selected through the model name instead).
+	effortConfigKey string
 
 	// promptPositional makes the task a trailing positional argument (emitted LAST,
 	// after subcmd and every flag) instead of promptFlag's value — for CLIs like
@@ -171,11 +263,20 @@ type backend struct {
 	// ["--skip-git-repo-check", "--color", "never"]). nil for CLIs that need none.
 	extraArgs []string
 
-	// reasonOnlyArgs are appended only when allow_tools is false — the restraint a
-	// CLI needs to stay read-only when it has no true no-tools mode (codex:
-	// ["--sandbox", "read-only"]). gemini/claude leave this nil: omitting the
-	// skip-perms flag already makes them reason-only.
+	// reasonOnlyArgs are appended in the default `reason` mode — the restraint a
+	// CLI needs to stay safe in the no-bypass tier. codex uses ["--sandbox",
+	// "read-only"] (it has no true no-tools mode); claude uses ["--tools", ""] to
+	// HARD-DISABLE all built-in tools, because omitting the skip-perms flag alone does
+	// NOT stop `claude --print` from reading (its read tools are auto-allowed). antigravity
+	// leaves this nil: agy has no tool-disabling flag, so its reason tier can still
+	// read — see reasonOnlyNote.
 	reasonOnlyArgs []string
+
+	// readOnlyArgs are appended in `read` mode — the flags that grant read-only
+	// exploration (claude: ["--permission-mode", "plan"]; codex: ["--sandbox",
+	// "read-only"]). nil means the backend has no read-only tier (antigravity), so `read`
+	// is rejected for it. supportsReadOnly() reports presence.
+	readOnlyArgs []string
 
 	// reasonOnlyNote overrides the result-header mode note for reason-only runs.
 	// "" yields the default "tool-use: disabled (reason/answer only)"; codex sets it
@@ -184,33 +285,226 @@ type backend struct {
 
 	// timeoutHeadroom is extra wall-clock added to the requested timeout before the
 	// child is hard-killed. Non-zero only for CLIs with their own internal timeout
-	// (gemini/agy); zero for claude/codex (the context deadline is the timeout).
+	// (antigravity/agy); zero for claude/codex (the context deadline is the timeout).
 	timeoutHeadroom time.Duration
 
-	description    string // model-facing tool description
-	allowToolsDesc string // description for the allow_tools param
+	// needsPTY runs the CLI attached to a pseudo-terminal instead of plain pipes.
+	// Required for agy: its agentic `--print` loop only runs to completion with a
+	// controlling TTY — spawned headless (pipes) it hangs until killed, burning the
+	// whole timeout. claude/codex are built for headless --print/exec and leave this
+	// false. Only honored where ptySupported (unix); elsewhere it falls back to pipes.
+	needsPTY bool
+
+	// tiers maps a reviewer tier ("deep"/"fast") to the model+effort it resolves to,
+	// so a caller can pass a stable tier instead of a CLI-specific model name. nil =
+	// the backend exposes no tier presets (and no `tier` param). See resolveTier.
+	tiers map[string]tierSpec
+
+	// modelListCmd enumerates the CLI's models (e.g. ["models"] for agy) to resolve a
+	// tierSpec.modelMatch at runtime. nil for backends whose tiers carry explicit model
+	// names (claude) or omit the model (codex).
+	modelListCmd []string
+
+	// authCheck is the argv (after the binary) of a cheap, non-inference auth/health
+	// command for list_agents' `auth` probe — claude ["auth","status"], codex
+	// ["doctor","--json"]. nil when the CLI has none (agy) → auth reported "unknown".
+	authCheck []string
+
+	// authParse interprets authCheck's output (and run error) into an auth verdict
+	// ("yes"/"no"/"unknown") + a short detail. Per-CLI because each emits a different
+	// JSON shape (claude loggedIn; codex doctor checks). nil alongside a nil authCheck.
+	authParse func(out []byte, runErr error) (authed, detail string)
+
+	description string // model-facing tool description
+	modeDesc    string // description for the `mode` param
+	effortDesc  string // description for the effort param ("" if the backend has no effort lever)
 }
 
 // supportsSandbox reports whether the backend exposes the sandbox option.
 func (b backend) supportsSandbox() bool { return b.sandboxFlag != "" }
 
-// resolveBin finds the backend's CLI executable: binEnv override → PATH →
-// ~/.local/bin/<cliName> → bare cliName. The explicit fallback matters because a
-// parent agent may spawn this server with a minimal PATH.
-func (b backend) resolveBin() string {
+// supportsReadOnly reports whether the backend has a `read` (read-only) tier.
+// antigravity has none (only no-tools or full), so `mode: "read"` is rejected for it.
+func (b backend) supportsReadOnly() bool { return len(b.readOnlyArgs) > 0 }
+
+// appliesEffort reports whether the backend exposes a reasoning-effort lever (a
+// dedicated flag or codex's config-key form). antigravity has none — its effort lives in
+// the model name — so its tool omits the effort param and ignores any value passed.
+func (b backend) appliesEffort() bool { return b.effortFlag != "" || b.effortConfigKey != "" }
+
+// tierNames returns the backend's tier keys in stable (sorted) order, for the
+// `tier` param description and unknown-tier error messages.
+func (b backend) tierNames() []string {
+	names := make([]string, 0, len(b.tiers))
+	for k := range b.tiers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tierDesc builds the `tier` param description, naming the backend's actual presets.
+func (b backend) tierDesc() string {
+	fields := "model"
+	if b.appliesEffort() {
+		fields = "model+effort"
+	}
+	return fmt.Sprintf(
+		"Optional reviewer tier resolving %s for this backend: %s (deep = most capable, fast = cheaper/faster). "+
+			"An explicit `model`/`effort` param overrides the tier per-field. Omit for the CLI/provider default.",
+		fields, strings.Join(b.tierNames(), " | "))
+}
+
+// pickModel returns the first non-empty line of `<cli> models` output containing
+// every substring in match (case-insensitive), trimmed; "" if none match or match
+// is empty. Pure — table-testable.
+func pickModel(modelsOutput string, match []string) string {
+	if len(match) == 0 {
+		return ""
+	}
+	for _, line := range strings.Split(modelsOutput, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		matched := true
+		for _, sub := range match {
+			if !strings.Contains(strings.ToLower(s), strings.ToLower(sub)) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return s
+		}
+	}
+	return ""
+}
+
+// resolveTier maps a tier to (model, effort) for backend b, honoring explicit
+// overrides PER FIELD: an explicit reqModel/reqEffort wins over the tier preset,
+// which beats the CLI default. discover resolves a tierSpec.modelMatch (agy) to a
+// concrete model name; it is injected so tests need no real `agy models` call.
+// Either returned value may be "" (→ CLI default). Returns an error for an unknown
+// tier. Pure given a pure discover.
+func resolveTier(b backend, tier, reqModel, reqEffort string,
+	discover func(match []string) string) (model, effort string, err error) {
+	model, effort = reqModel, reqEffort
+	if strings.TrimSpace(tier) == "" {
+		return model, effort, nil
+	}
+	spec, ok := b.tiers[tier]
+	if !ok {
+		return "", "", fmt.Errorf("invalid tier %q — valid tiers are %s", tier, strings.Join(b.tierNames(), " | "))
+	}
+	if strings.TrimSpace(model) == "" {
+		if len(spec.modelMatch) > 0 {
+			// A discovery-based tier (agy) MUST resolve to a concrete model. If it can't
+			// — `<cli> models` failed, or its output no longer matches modelMatch — do NOT
+			// silently fall through to the CLI default: the caller asked for a specific
+			// tier (e.g. a "deep" Pro model) and would otherwise get an unflagged default
+			// while the result header still reports tier=deep. Fail loud so they can pass
+			// an explicit `model`, omit `tier`, or fix the match.
+			model = discover(spec.modelMatch)
+			if strings.TrimSpace(model) == "" {
+				return "", "", fmt.Errorf(
+					"tier %q: could not resolve a model for %s (no `%s` entry matching %q) — "+
+						"pass an explicit `model`, or omit `tier`",
+					tier, b.cliName, strings.Join(b.modelListCmd, " "), strings.Join(spec.modelMatch, " "))
+			}
+		} else {
+			model = spec.model
+		}
+	}
+	if strings.TrimSpace(effort) == "" && b.appliesEffort() {
+		effort = spec.effort
+	}
+	return model, effort, nil
+}
+
+// modelCache memoizes discovered model names per (cli, match) for the process
+// lifetime — `<cli> models` output rarely changes mid-run, and a restart re-resolves.
+var modelCache sync.Map // key: cliName + "\x00" + join(match); val: string
+
+// discoverModel runs the backend's modelListCmd and returns the model name matching
+// `match` (see pickModel), memoized. Returns "" on any error/miss; resolveTier turns an
+// empty result for a discovery-based tier into a clear error rather than silently using
+// the CLI default. NOT pure (spawns a subprocess) — deliberately kept out of buildArgs
+// so that stays table-testable.
+func (b backend) discoverModel(ctx context.Context, match []string) string {
+	if len(b.modelListCmd) == 0 || len(match) == 0 {
+		return ""
+	}
+	key := b.cliName + "\x00" + strings.Join(match, "\x00")
+	if v, ok := modelCache.Load(key); ok {
+		return v.(string)
+	}
+	// Bound by the caller's context (so a canceled/timed-out request stops the probe)
+	// under a short cap of its own — listing models should be near-instant. Harden the
+	// spawn like runAgent: WaitDelay + a process-group kill so a stray grandchild that
+	// inherits the pipes can't keep .Output() blocked past the deadline.
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, b.resolveBin(), b.modelListCmd...)
+	cmd.WaitDelay = childWaitDelay
+	setupProcessGroup(cmd)
+	out, err := cmd.Output()
+	model := ""
+	if err == nil {
+		model = pickModel(string(out), match)
+	}
+	if model != "" {
+		modelCache.Store(key, model) // cache successes only; don't poison on a transient failure
+	}
+	return model
+}
+
+// locate finds the backend's CLI executable and reports HOW it was found, for
+// list_agents' availability probe: binEnv override → PATH → ~/.local/bin/<cliName>.
+// source is "env" | "path" | "local-bin" when found, "" when not. The explicit
+// fallback matters because a parent agent may spawn this server with a minimal PATH.
+func (b backend) locate() (path, source string, found bool) {
 	if v := strings.TrimSpace(os.Getenv(b.binEnv)); v != "" {
-		return v
+		if isExecutableFile(v) {
+			return v, "env", true
+		}
+		return v, "env", false
 	}
 	if p, err := exec.LookPath(b.cliName); err == nil {
-		return p
+		return p, "path", true
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		fallback := filepath.Join(home, ".local", "bin", b.cliName)
-		if _, statErr := os.Stat(fallback); statErr == nil {
-			return fallback
+		if isExecutableFile(fallback) {
+			return fallback, "local-bin", true
 		}
 	}
-	return b.cliName
+	return b.cliName, "", false
+}
+
+// isExecutableFile reports whether path is a regular file the OS can execute. locate's
+// binEnv and local-bin branches use it so a directory or a non-executable file is NOT
+// reported as an installed CLI (a later spawn would fail with is-a-directory/permission).
+// The PATH branch relies on exec.LookPath, which already enforces this. Windows has no
+// execute bit, so there a regular file is accepted (PATHEXT/LookPath governs PATH lookups).
+func isExecutableFile(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return fi.Mode()&0o111 != 0
+}
+
+// resolveBin returns the path to the backend's CLI — the resolved executable, or the
+// bare cliName as a last resort so exec surfaces a clear "not found". See locate for
+// the lookup order. A binEnv override is honored even if it does not exist (so the
+// configured path appears verbatim in exec's error).
+func (b backend) resolveBin() string {
+	path, _, _ := b.locate()
+	return path
 }
 
 // buildArgs builds the CLI invocation from the backend's flag spec. CRITICAL for
@@ -232,6 +526,17 @@ func (b backend) buildArgs(o runOpts) []string {
 	if b.modelFlag != "" && strings.TrimSpace(o.model) != "" {
 		args = append(args, b.modelFlag, o.model)
 	}
+	// Reasoning effort: a dedicated flag (claude --effort) or codex's config-key form
+	// (-c model_reasoning_effort=<value>). antigravity has neither, so its effort is dropped
+	// here (it is selected through the model name instead).
+	if strings.TrimSpace(o.effort) != "" {
+		switch {
+		case b.effortFlag != "":
+			args = append(args, b.effortFlag, o.effort)
+		case b.effortConfigKey != "":
+			args = append(args, "-c", b.effortConfigKey+"="+o.effort)
+		}
+	}
 	if b.addDirFlag != "" {
 		for _, d := range o.addDirs {
 			args = append(args, b.addDirFlag, d)
@@ -244,9 +549,17 @@ func (b backend) buildArgs(o runOpts) []string {
 		args = append(args, b.sandboxFlag)
 	}
 	args = append(args, b.extraArgs...)
-	// reasonOnlyArgs keep a CLI without a true no-tools mode read-only when
-	// allow_tools is false (e.g. codex's --sandbox read-only).
-	if !o.allowTools {
+	// Restraint args for the non-acting tiers: `read` mode emits readOnlyArgs
+	// (claude --permission-mode plan / codex --sandbox read-only); the default
+	// `reason` mode emits reasonOnlyArgs (codex's read-only sandbox; claude's
+	// --tools "" no-tools lock; antigravity none — agy has no tool-disabling flag). The
+	// act tier emitted its skip-perms flag above and adds neither.
+	switch {
+	case o.allowTools:
+		// skip-perms flag already emitted; no restraint args.
+	case o.readOnly:
+		args = append(args, b.readOnlyArgs...)
+	default:
 		args = append(args, b.reasonOnlyArgs...)
 	}
 	// Positional prompt goes LAST, after subcmd and every flag, preceded by the "--"
@@ -265,15 +578,37 @@ func (b backend) buildArgs(o runOpts) []string {
 // reasonOnlyNote when set (codex is read-only, not no-tools), and the enabled note
 // names the backend's actual skip-perms / sandbox flags.
 func (b backend) modeNote(o runOpts) string {
-	if !o.allowTools {
+	switch {
+	case o.allowTools:
+		note := fmt.Sprintf("tool-use: ENABLED (%s)", b.skipPermsFlag)
+		if o.sandbox && b.supportsSandbox() {
+			note += " in " + b.sandboxFlag
+		}
+		return note
+	case o.readOnly:
+		return "tool-use: read-only (" + strings.Join(b.readOnlyArgs, " ") + ")"
+	default:
 		if b.reasonOnlyNote != "" {
 			return b.reasonOnlyNote
 		}
 		return "tool-use: disabled (reason/answer only)"
 	}
-	note := fmt.Sprintf("tool-use: ENABLED (%s)", b.skipPermsFlag)
-	if o.sandbox && b.supportsSandbox() {
-		note += " in " + b.sandboxFlag
+}
+
+// selectionNote summarizes the model/effort actually requested, for the result
+// header — so the caller (and the user) can confirm an override took effect. model
+// is always shown ("default" when unset); effort only for backends that apply it.
+func (b backend) selectionNote(o runOpts) string {
+	model := strings.TrimSpace(o.model)
+	if model == "" {
+		model = "default"
+	}
+	note := "model=" + model
+	if b.appliesEffort() && strings.TrimSpace(o.effort) != "" {
+		note += " effort=" + o.effort
+	}
+	if strings.TrimSpace(o.tier) != "" {
+		note += " tier=" + o.tier
 	}
 	return note
 }
@@ -284,7 +619,7 @@ func (b backend) modeNote(o runOpts) string {
 // new entry can never be silently forgotten.
 var backends = []backend{
 	{
-		tool:            "gemini_agent",
+		tool:            "antigravity_agent",
 		cliName:         "agy",
 		binEnv:          "AGY_BIN",
 		promptFlag:      "--print",
@@ -293,9 +628,25 @@ var backends = []backend{
 		addDirFlag:      "--add-dir",
 		skipPermsFlag:   "--dangerously-skip-permissions",
 		sandboxFlag:     "--sandbox",
-		timeoutHeadroom: geminiTimeoutHeadroom,
-		description:     geminiToolDescription,
-		allowToolsDesc:  geminiAllowToolsDescription,
+		timeoutHeadroom: antigravityTimeoutHeadroom,
+		needsPTY:        true, // agy's agentic --print hangs without a controlling TTY
+		modelListCmd:    []string{"models"},
+		tiers: map[string]tierSpec{
+			// agy has no model alias and bakes effort into the model NAME, so the tier's
+			// model is discovered from `agy models` output at runtime (see discoverModel).
+			"deep": {modelMatch: []string{"Pro", "(High)"}},
+			"fast": {modelMatch: []string{"Flash", "(Medium)"}},
+		},
+		// no authCheck: agy exposes no auth/status/doctor subcommand, so list_agents
+		// reports its auth as "unknown" rather than guessing.
+		// no readOnlyArgs — antigravity has no read-only tier (only reason or act). agy also
+		// has no tool-disabling flag and does not gate writes behind the bypass flag, so a
+		// reason agent with a writable working_dir can still read AND edit unattended (use a
+		// throwaway working_dir to keep it off your files — --sandbox does NOT confine writes);
+		// reasonOnlyNote states the no-bypass tier honestly.
+		reasonOnlyNote: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
+		description:    antigravityToolDescription,
+		modeDesc:       antigravityModeDescription,
 	},
 	{
 		tool:          "claude_agent",
@@ -303,11 +654,26 @@ var backends = []backend{
 		binEnv:        "CLAUDE_BIN",
 		promptFlag:    "--print",
 		modelFlag:     "--model",
+		effortFlag:    "--effort",
 		addDirFlag:    "--add-dir",
 		skipPermsFlag: "--dangerously-skip-permissions",
+		// reason tier: hard-disable ALL built-in tools. Omitting skip-perms is NOT
+		// enough — `claude --print` auto-allows Read/Grep/Glob, so a reason run could
+		// still read the filesystem. `--tools ""` (documented: "" disables all tools)
+		// makes reason genuinely no-tools, matching the "reason/answer only" header.
+		reasonOnlyArgs: []string{"--tools", ""},
+		readOnlyArgs:   []string{"--permission-mode", "plan"}, // claude's read-only tier (plan mode)
+		tiers: map[string]tierSpec{
+			// opus/sonnet are family aliases that always resolve to the latest model.
+			"deep": {model: "opus", effort: "xhigh"},
+			"fast": {model: "sonnet", effort: "medium"},
+		},
+		authCheck: []string{"auth", "status", "--json"}, // cheap, non-inference auth check; --json so parseClaudeAuth never depends on the default output shape
+		authParse: parseClaudeAuth,
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
-		description:    claudeToolDescription,
-		allowToolsDesc: claudeAllowToolsDescription,
+		description: claudeToolDescription,
+		modeDesc:    claudeModeDescription,
+		effortDesc:  claudeEffortDescription,
 	},
 	{
 		tool:             "codex_agent",
@@ -316,26 +682,36 @@ var backends = []backend{
 		subcmd:           []string{"exec"},
 		promptPositional: true,
 		modelFlag:        "--model",
+		effortConfigKey:  "model_reasoning_effort",
 		addDirFlag:       "--add-dir",
 		skipPermsFlag:    "--dangerously-bypass-approvals-and-sandbox",
 		extraArgs:        []string{"--skip-git-repo-check", "--color", "never"},
 		reasonOnlyArgs:   []string{"--sandbox", "read-only"},
+		readOnlyArgs:     []string{"--sandbox", "read-only"}, // codex's reason and read tiers are the same read-only sandbox
 		reasonOnlyNote:   "tool-use: read-only (--sandbox read-only)",
+		tiers: map[string]tierSpec{
+			// model omitted (CLI default = recommended frontier); tier sets effort only.
+			"deep": {effort: "high"},
+			"fast": {effort: "low"},
+		},
+		authCheck: []string{"doctor", "--json"}, // diagnoses install/config/auth/runtime
+		authParse: parseCodexAuth,
 		// promptFlag/timeoutFlag/sandboxFlag "" — codex takes the prompt positionally
 		// (`codex exec [flags] <prompt>`), has no internal print-timeout (timeoutHeadroom
 		// 0 — the ctx deadline IS the timeout), and exposes no boolean sandbox param
-		// (allow_tools toggles read-only sandbox vs. the bypass flag instead).
-		description:    codexToolDescription,
-		allowToolsDesc: codexAllowToolsDescription,
+		// (mode toggles read-only sandbox vs. the bypass flag instead).
+		description: codexToolDescription,
+		modeDesc:    codexModeDescription,
+		effortDesc:  codexEffortDescription,
 	},
 }
 
 // Named references into the registry, for tests. Derived from backends so they
 // can't drift from what the server actually registers.
 var (
-	geminiBackend = backends[0]
-	claudeBackend = backends[1]
-	codexBackend  = backends[2]
+	antigravityBackend = backends[0]
+	claudeBackend      = backends[1]
+	codexBackend       = backends[2]
 )
 
 // parseHopEnv reads the current delegation depth and max from a getenv-style
@@ -378,6 +754,36 @@ func childHopEnv(env []string, depth int) []string {
 	return out
 }
 
+// delegationDisabled reports whether this server was spawned by a reason-only
+// parent that forbids any further delegation (AGENT_NO_DELEGATE=1). Only an
+// exact "1" counts, so a stray empty/other value never silently blocks calls.
+// Pure function — table-testable (pass a map-backed getenv).
+func delegationDisabled(getenv func(string) string) bool {
+	return strings.TrimSpace(getenv(noDelegateEnv)) == "1"
+}
+
+// childDelegationEnv returns a copy of env with any existing AGENT_NO_DELEGATE
+// entry REMOVED, then appends "AGENT_NO_DELEGATE=1" iff the spawned child is
+// NON-ACTING (reason or read mode — i.e. !allowTools). A non-acting child must not
+// delegate further, so the flag rides its environment to any bridge server the
+// child itself launches, where delegationDisabled() makes runAgent refuse. An
+// acting child (mode act) gets no flag and may still delegate, bounded by the hop
+// guard. Pure function — table-testable.
+func childDelegationEnv(env []string, frozen bool) []string {
+	prefix := noDelegateEnv + "="
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if frozen {
+		out = append(out, noDelegateEnv+"=1")
+	}
+	return out
+}
+
 func main() {
 	s := server.NewMCPServer(
 		"agent-bridge-mcp",
@@ -388,6 +794,8 @@ func main() {
 	for _, b := range backends {
 		s.AddTool(newTool(b), makeHandler(b))
 	}
+	s.AddTool(listAgentsTool(), listAgentsHandler)
+	s.AddTool(parallelAgentsTool(), parallelAgentsHandler)
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "agent-bridge-mcp: server error: %v\n", err)
@@ -395,11 +803,11 @@ func main() {
 	}
 }
 
-// commonToolOptions returns the tool options shared by both tools: the given
-// description plus the task/add_dirs/working_dir/timeout_seconds/model/allow_tools
-// params. Per-tool extras (e.g. gemini's sandbox) are appended by the caller.
-// Defining the shared params once keeps the two tool schemas from drifting.
-func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOption {
+// commonToolOptions returns the tool options shared by every tool: the given
+// description plus the task/add_dirs/working_dir/timeout_seconds/model/mode params.
+// Per-tool extras (e.g. antigravity's sandbox, the effort param) are appended by the
+// caller. Defining the shared params once keeps the tool schemas from drifting.
+func commonToolOptions(description, modeDescription string) []mcp.ToolOption {
 	return []mcp.ToolOption{
 		mcp.WithDescription(description),
 		mcp.WithString("task",
@@ -411,16 +819,21 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 			mcp.Items(map[string]any{"type": "string"}),
 		),
 		mcp.WithString("working_dir",
-			mcp.Description("Directory the agent runs in (absolute path). Defaults to this server's working directory."),
+			mcp.Description("Directory the agent runs in (absolute path). Defaults to this server's own working "+
+				"directory — NOT necessarily the repo you want reviewed/edited — so set it explicitly when the agent "+
+				"must read or write a specific project (e.g. codex_agent's read-only mode resolves its file reads against this dir)."),
 		),
 		mcp.WithNumber("timeout_seconds",
 			mcp.Description(fmt.Sprintf("Max seconds to wait for the agent (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)),
 		),
 		mcp.WithString("model",
-			mcp.Description("Optional model to use (passed as --model). Leave empty for the CLI default."),
+			mcp.Description("Optional model (passed as --model); leave empty for the CLI/provider default (Codex maps that "+
+				"to its recommended frontier model). Claude takes family aliases like `opus`/`sonnet`/`haiku` that always "+
+				"resolve to the latest; agy/codex take explicit names (list them with `agy models`). For reasoning effort "+
+				"see the `effort` param (claude_agent / codex_agent)."),
 		),
-		mcp.WithBoolean("allow_tools",
-			mcp.Description(allowToolsDescription),
+		mcp.WithString("mode",
+			mcp.Description(modeDescription),
 		),
 	}
 }
@@ -428,84 +841,415 @@ func commonToolOptions(description, allowToolsDescription string) []mcp.ToolOpti
 // newTool builds the MCP tool for a backend: the shared params, plus the sandbox
 // option for backends that support it.
 func newTool(b backend) mcp.Tool {
-	opts := commonToolOptions(b.description, b.allowToolsDesc)
+	opts := commonToolOptions(b.description, b.modeDesc)
+	if b.appliesEffort() {
+		opts = append(opts, mcp.WithString("effort", mcp.Description(b.effortDesc)))
+	}
+	if len(b.tiers) > 0 {
+		opts = append(opts, mcp.WithString("tier", mcp.Description(b.tierDesc())))
+	}
 	if b.supportsSandbox() {
 		opts = append(opts, mcp.WithBoolean("sandbox", mcp.Description(sandboxDescription)))
 	}
 	return mcp.NewTool(b.tool, opts...)
 }
 
-// makeHandler returns the MCP handler for a backend. The `sandbox` param is read
-// from the request only for backends that support it (b.supportsSandbox()).
+// jobInput is the raw, pre-validation parameters of a single spawn, sourced from
+// either a tool request (makeHandler) or one entry of parallel_agents' `jobs` array.
+// buildRunOpts validates and resolves it to a runOpts, so both entry points share a
+// single source of truth for mode/tier/sandbox handling.
+type jobInput struct {
+	task           string
+	mode           string
+	tier           string
+	model          string
+	effort         string
+	sandbox        bool
+	workingDir     string
+	addDirs        []string
+	timeoutSeconds int // 0 → default
+}
+
+// buildRunOpts validates a jobInput against a backend and resolves it to a runOpts.
+// On any validation failure it returns a non-nil MCP error result (and a zero
+// runOpts); callers must check the result first. It may shell out to `<cli> models`
+// (agy tier discovery), so it takes a context and is gated by delegationGuard before
+// doing so.
+func buildRunOpts(ctx context.Context, b backend, in jobInput) (runOpts, *mcp.CallToolResult) {
+	task := strings.TrimSpace(in.task)
+	if task == "" {
+		return runOpts{}, mcp.NewToolResultError("`task` is required and must be a non-empty string")
+	}
+
+	timeoutSeconds := defaultTimeoutSeconds
+	if in.timeoutSeconds > 0 {
+		timeoutSeconds = in.timeoutSeconds
+	}
+	if timeoutSeconds > maxTimeoutSeconds {
+		timeoutSeconds = maxTimeoutSeconds
+	}
+
+	o := runOpts{
+		task:           task,
+		timeoutSeconds: timeoutSeconds,
+		model:          strings.TrimSpace(in.model),
+		effort:         strings.TrimSpace(in.effort),
+		workingDir:     in.workingDir,
+	}
+
+	// Resolve the access tier from the `mode` enum (reason | read | act); an
+	// omitted/blank mode means reason. `read` is rejected for backends with no
+	// read-only tier (antigravity). Validated BEFORE the tier block below so an
+	// invalid request (e.g. agy + read) is rejected up front, without first shelling
+	// out to `<cli> models` for tier model discovery.
+	mode := strings.ToLower(strings.TrimSpace(in.mode))
+	if mode == "" {
+		mode = modeReason
+	}
+	switch mode {
+	case modeReason:
+		// defaults: allowTools=false, readOnly=false
+	case modeRead:
+		if !b.supportsReadOnly() {
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+				"%s: no read-only mode — use mode \"reason\" (no unattended edits/commands) or \"act\" (full access). "+
+					"Only claude_agent and codex_agent have a read-only tier.", b.tool))
+		}
+		o.readOnly = true
+	case modeAct:
+		o.allowTools = true
+	default:
+		return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+			"%s: invalid mode %q — valid modes are reason | read | act.", b.tool, mode))
+	}
+
+	// Resolve an optional reviewer tier (deep/fast) → model+effort. Explicit
+	// model/effort params override per-field; for agy the tier's model name is
+	// discovered from `agy models` at runtime. Backends with no presets reject it.
+	if tier := strings.ToLower(strings.TrimSpace(in.tier)); tier != "" {
+		if len(b.tiers) == 0 {
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+				"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool))
+		}
+		// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
+		// tier model discovery shells out to `agy models`, and a child that will be
+		// refused at spawn time must not run any subprocess first. (mode is already
+		// validated above, so an invalid mode never reaches this discovery either.)
+		if res := delegationGuard(b.tool); res != nil {
+			return runOpts{}, res
+		}
+		discover := func(match []string) string { return b.discoverModel(ctx, match) }
+		model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
+		if terr != nil {
+			// discoverModel shells out to `<cli> models` under the request context; if
+			// that context was canceled/expired mid-probe, resolveTier just sees an empty
+			// model and reports "could not resolve a model" — a misleading validation
+			// message for what is really a cancellation. Surface the context error so the
+			// caller sees the true cause. (The inner 10s discovery cap firing while the
+			// request context is still live is NOT this case: ctx.Err() is nil there, so a
+			// genuine resolution failure is still reported as such.)
+			if ctx.Err() != nil {
+				return runOpts{}, mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, ctx.Err()))
+			}
+			return runOpts{}, mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr))
+		}
+		o.model, o.effort, o.tier = model, effort, tier
+	}
+
+	// sandbox defaults OFF and is antigravity-only. --sandbox applies agy's
+	// "terminal restrictions" but does NOT confine file edits (a write under it
+	// still lands in working_dir, verified), so it is not a write guard — to keep
+	// agy off your files use a throwaway working_dir. Backends without a sandbox
+	// concept (claude/codex) ignore it.
+	if b.supportsSandbox() {
+		o.sandbox = in.sandbox
+	}
+
+	for _, d := range in.addDirs {
+		if s := strings.TrimSpace(d); s != "" {
+			o.addDirs = append(o.addDirs, s)
+		}
+	}
+
+	return o, nil
+}
+
+// makeHandler returns the MCP handler for a backend: it extracts the request params
+// into a jobInput, resolves them via buildRunOpts (shared with parallel_agents), and
+// runs the spawn. The `sandbox` param is read only for backends that support it.
 func makeHandler(b backend) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Check context cancellation before executing.
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-
-		task := strings.TrimSpace(req.GetString("task", ""))
-		if task == "" {
-			return mcp.NewToolResultError("`task` is required and must be a non-empty string"), nil
-		}
-
-		timeoutSeconds := defaultTimeoutSeconds
-		if v := req.GetInt("timeout_seconds", 0); v > 0 {
-			timeoutSeconds = v
-		}
-		if timeoutSeconds > maxTimeoutSeconds {
-			timeoutSeconds = maxTimeoutSeconds
-		}
-
-		o := runOpts{
-			task:           task,
-			timeoutSeconds: timeoutSeconds,
-			allowTools:     req.GetBool("allow_tools", false),
-			model:          strings.TrimSpace(req.GetString("model", "")),
+		in := jobInput{
+			task:           req.GetString("task", ""),
+			mode:           req.GetString("mode", ""),
+			tier:           req.GetString("tier", ""),
+			model:          req.GetString("model", ""),
+			effort:         req.GetString("effort", ""),
 			workingDir:     req.GetString("working_dir", ""),
+			addDirs:        req.GetStringSlice("add_dirs", nil),
+			timeoutSeconds: req.GetInt("timeout_seconds", 0),
 		}
-
-		// sandbox defaults OFF and is gemini-only. With --sandbox, agy confines
-		// the agent to an isolated scratch dir, so its file edits do NOT land in
-		// working_dir — useless for real project edits. Callers wanting a
-		// confined "compute but don't touch my files" run set sandbox: true
-		// explicitly. claude has no sandbox concept, so the param is not read.
 		if b.supportsSandbox() {
-			o.sandbox = req.GetBool("sandbox", false)
+			in.sandbox = req.GetBool("sandbox", false)
 		}
-
-		for _, d := range req.GetStringSlice("add_dirs", nil) {
-			if s := strings.TrimSpace(d); s != "" {
-				o.addDirs = append(o.addDirs, s)
-			}
+		o, errRes := buildRunOpts(ctx, b, in)
+		if errRes != nil {
+			return errRes, nil
 		}
-
 		return runAgent(ctx, b, o)
 	}
+}
+
+// maxParallelJobs caps how many spawns one parallel_agents call may request — a
+// backstop against a runaway fan-out, since each job is a full CLI + model spawn.
+const maxParallelJobs = 32
+
+const parallelAgentsToolName = "parallel_agents"
+
+const parallelAgentsDescription = "Run several agent spawns CONCURRENTLY in a single call and return all their " +
+	"results. Provide `jobs`: a non-empty array of {agent, task, ...} objects, where `agent` is one of " +
+	"antigravity_agent | claude_agent | codex_agent and the other fields mirror that agent's own params (task, mode, " +
+	"tier, model, effort, sandbox, working_dir, add_dirs, timeout_seconds). The bridge runs the jobs as parallel " +
+	"goroutines so they genuinely overlap — prefer this over issuing many separate agent tool calls, because MCP host " +
+	"clients (Claude Code, Codex, Antigravity) dispatch individual tool calls SERIALLY, so N separate calls run " +
+	"back-to-back (wall-clock = sum) while parallel_agents runs them at once (wall-clock ≈ the slowest). Each job " +
+	"reuses the same per-backend semantics, the delegation hop-guard, and the reason/read no-delegate freeze as " +
+	"calling the agent directly. Results are returned in job order, each under a `===== job N: <agent> =====` divider " +
+	"with the agent's usual `[agent | mode | model… | elapsed]` header. Validation is all-or-nothing: a malformed or " +
+	"unknown-agent job fails the whole call before any spawn. `max_concurrency` caps simultaneous spawns (default: " +
+	"all jobs at once)."
+
+// parallelAgentsTool defines the server-side fan-out tool. Its parallelism lives in
+// the bridge process (goroutines), so it is unaffected by host MCP clients that
+// serialize individual tool-call dispatch.
+func parallelAgentsTool() mcp.Tool {
+	jobSchema := map[string]any{
+		"type":     "object",
+		"required": []string{"agent", "task"},
+		"properties": map[string]any{
+			"agent":           map[string]any{"type": "string", "enum": []string{"antigravity_agent", "claude_agent", "codex_agent"}, "description": "Which agent to spawn."},
+			"task":            map[string]any{"type": "string", "description": "The complete, self-contained task for this agent."},
+			"mode":            map[string]any{"type": "string", "description": "reason | read | act (per-backend; antigravity has no read). Default reason."},
+			"tier":            map[string]any{"type": "string", "description": "Reviewer tier deep | fast → model+effort (server-resolved)."},
+			"model":           map[string]any{"type": "string", "description": "Optional model override."},
+			"effort":          map[string]any{"type": "string", "description": "Optional reasoning effort (claude/codex)."},
+			"sandbox":         map[string]any{"type": "boolean", "description": "antigravity_agent only; see its sandbox caveats."},
+			"working_dir":     map[string]any{"type": "string", "description": "Directory the agent runs in (absolute path)."},
+			"add_dirs":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Extra workspace dirs (absolute paths)."},
+			"timeout_seconds": map[string]any{"type": "number", "description": fmt.Sprintf("Per-job timeout (default %d, max %d).", defaultTimeoutSeconds, maxTimeoutSeconds)},
+		},
+	}
+	return mcp.NewTool(parallelAgentsToolName,
+		mcp.WithDescription(parallelAgentsDescription),
+		mcp.WithArray("jobs",
+			mcp.Required(),
+			mcp.Description("Agent spawns to run concurrently; each is a {agent, task, ...} object."),
+			mcp.Items(jobSchema),
+		),
+		mcp.WithNumber("max_concurrency",
+			mcp.Description("Maximum spawns running at once (default: all jobs; values < 1 mean no limit)."),
+		),
+	)
+}
+
+// backendByTool finds a backend by its MCP tool name.
+func backendByTool(tool string) (backend, bool) {
+	for _, b := range backends {
+		if b.tool == tool {
+			return b, true
+		}
+	}
+	return backend{}, false
+}
+
+// job-map accessors: parallel_agents' jobs arrive as generic JSON objects
+// (map[string]any), so each field is read defensively. JSON numbers decode to float64.
+func jobStr(m map[string]any, key string) string { s, _ := m[key].(string); return s }
+func jobBool(m map[string]any, key string) bool  { b, _ := m[key].(bool); return b }
+func jobInt(m map[string]any, key string) int {
+	switch v := m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+func jobStrSlice(m map[string]any, key string) []string {
+	raw, ok := m[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, e := range raw {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// parallelAgentsHandler validates every job up front (all-or-nothing), then spawns
+// them concurrently (bounded by max_concurrency) and returns their outputs in job order.
+func parallelAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	// The fan-out is itself a spawn from this process; if delegation is frozen
+	// (reason-only child) or at the hop limit, every job would be refused — say so once.
+	if res := delegationGuard(parallelAgentsToolName); res != nil {
+		return res, nil
+	}
+
+	rawJobs, ok := req.GetArguments()["jobs"].([]any)
+	if !ok || len(rawJobs) == 0 {
+		return mcp.NewToolResultError("`jobs` is required and must be a non-empty array of {agent, task, ...} objects"), nil
+	}
+	if len(rawJobs) > maxParallelJobs {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"too many jobs (%d); maximum is %d per call", len(rawJobs), maxParallelJobs)), nil
+	}
+
+	type plan struct {
+		b     backend
+		o     runOpts
+		agent string
+	}
+	plans := make([]plan, len(rawJobs))
+	for i, rj := range rawJobs {
+		m, ok := rj.(map[string]any)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("jobs[%d] must be an object", i)), nil
+		}
+		agent := strings.TrimSpace(jobStr(m, "agent"))
+		b, ok := backendByTool(agent)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"jobs[%d]: unknown agent %q — use antigravity_agent | claude_agent | codex_agent", i, agent)), nil
+		}
+		in := jobInput{
+			task:           jobStr(m, "task"),
+			mode:           jobStr(m, "mode"),
+			tier:           jobStr(m, "tier"),
+			model:          jobStr(m, "model"),
+			effort:         jobStr(m, "effort"),
+			workingDir:     jobStr(m, "working_dir"),
+			addDirs:        jobStrSlice(m, "add_dirs"),
+			timeoutSeconds: jobInt(m, "timeout_seconds"),
+		}
+		if b.supportsSandbox() {
+			in.sandbox = jobBool(m, "sandbox")
+		}
+		o, errRes := buildRunOpts(ctx, b, in)
+		if errRes != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("jobs[%d] (%s): %s", i, agent, toolResultText(errRes))), nil
+		}
+		plans[i] = plan{b: b, o: o, agent: agent}
+	}
+
+	// Concurrency cap: default to all jobs at once; a positive max_concurrency lowers it.
+	limit := len(plans)
+	if mc := req.GetInt("max_concurrency", 0); mc > 0 && mc < limit {
+		limit = mc
+	}
+	sem := make(chan struct{}, limit)
+
+	texts := make([]string, len(plans))
+	failed := make([]bool, len(plans))
+	var wg sync.WaitGroup
+	for i := range plans {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			res, err := runAgent(ctx, plans[i].b, plans[i].o)
+			if err != nil {
+				// Only parent-context cancellation returns a Go error from runAgent.
+				texts[i] = fmt.Sprintf("(canceled: %v)", err)
+				failed[i] = true
+				return
+			}
+			texts[i] = toolResultText(res)
+			failed[i] = res.IsError
+		}(i)
+	}
+	wg.Wait()
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	errCount := 0
+	for _, f := range failed {
+		if f {
+			errCount++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("parallel_agents: %d job(s), max_concurrency=%d, %d reported error(s).\n",
+		len(plans), limit, errCount))
+	for i := range plans {
+		sb.WriteString(fmt.Sprintf("\n===== job %d: %s =====\n", i, plans[i].agent))
+		sb.WriteString(texts[i])
+		if !strings.HasSuffix(texts[i], "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// delegationGuard returns a non-nil error result when this process must refuse to spawn
+// a child: a reason-only parent froze it (AGENT_NO_DELEGATE=1), or it has reached the
+// hop-depth limit (AGENT_HOP_DEPTH >= AGENT_HOP_MAX). makeHandler consults it BEFORE
+// resolving a tier — so a child that will be refused never shells out to `<cli> models`
+// for tier model discovery first — and runAgent re-checks it as the authoritative gate.
+func delegationGuard(tool string) *mcp.CallToolResult {
+	// Reason-only freeze: stricter than (and independent of) the hop-depth counter.
+	if delegationDisabled(os.Getenv) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s: delegation disabled (%s=1). This agent was spawned reason-only by a parent "+
+				"agent and may not spawn further agents. Perform this task directly instead of delegating.",
+			tool, noDelegateEnv,
+		))
+	}
+	// Loop guard: refuse once the delegation depth limit is reached (runaway A→B→A→B).
+	if depth, hopMax := parseHopEnv(os.Getenv); hopLimitReached(depth, hopMax) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s: delegation-depth limit reached (%s=%d, %s=%d). "+
+				"Refusing to spawn another agent to avoid a runaway delegation loop. "+
+				"Perform this task directly instead of delegating further.",
+			tool, hopDepthEnv, depth, hopMaxEnv, hopMax,
+		))
+	}
+	return nil
 }
 
 // runAgent is the shared backend run path: hop guard, command construction,
 // timeout/context handling, truncation, and header formatting. Tool-level
 // failures (timeout, child error, hop limit) are encoded as MCP error results
 // with a nil Go error; only parent-context cancellation returns a Go error,
-// mirroring the original gemini_agent behavior.
+// mirroring the original antigravity_agent behavior.
 func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, error) {
-	// Loop guard: refuse to spawn a child once the delegation depth limit is
-	// reached, to prevent runaway A→B→A→B chains.
-	depth, hopMax := parseHopEnv(os.Getenv)
-	if hopLimitReached(depth, hopMax) {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"%s: delegation-depth limit reached (%s=%d, %s=%d). "+
-				"Refusing to spawn another agent to avoid a runaway delegation loop. "+
-				"Perform this task directly instead of delegating further.",
-			b.tool, hopDepthEnv, depth, hopMaxEnv, hopMax,
-		)), nil
+	// Refuse to spawn if frozen reason-only or at the hop-depth limit. makeHandler also
+	// checks this before tier resolution; runAgent re-checks for direct callers (e.g.
+	// checkServe) and is the authoritative gate.
+	if res := delegationGuard(b.tool); res != nil {
+		return res, nil
 	}
+	depth, _ := parseHopEnv(os.Getenv)
 
 	args := b.buildArgs(o)
 	modeNoteStr := b.modeNote(o)
 
-	// Give backends with their own internal timeout (gemini/agy) a little headroom
+	// Give backends with their own internal timeout (antigravity/agy) a little headroom
 	// beyond the requested timeout so they surface their own timeout message rather
 	// than us killing them first. claude has no internal timeout (headroom 0), so
 	// the context deadline IS the timeout. Guard against a negative timeout (a
@@ -522,26 +1266,48 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(o.workingDir) != "" {
 		cmd.Dir = o.workingDir
 	}
-	// Spawn the child with an incremented delegation depth (no duplicate keys).
-	cmd.Env = childHopEnv(os.Environ(), depth)
+	// Spawn the child with an incremented delegation depth (no duplicate keys), and
+	// — when this run is NON-ACTING (reason or read mode) — with AGENT_NO_DELEGATE=1
+	// so the child cannot re-enter the bridge to spawn a grandchild.
+	cmd.Env = childDelegationEnv(childHopEnv(os.Environ(), depth), !o.allowTools)
 
 	// Kill the whole process group on cancel/timeout (so grandchildren the child
 	// spawned die too) and bound how long Run may block on I/O afterward. Without
 	// this, a surviving grandchild that inherited the stdout/stderr pipes keeps
 	// them open and cmd.Run() hangs past the deadline, leaking the goroutine/fds.
-	setupProcessGroup(cmd)
 	cmd.WaitDelay = childWaitDelay
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// A pty-required backend (agy) hangs forever on plain pipes, so on a build with no
+	// pty support refuse up front instead of falling through to the pipe path and
+	// burning the entire timeout on a guaranteed hang.
+	if b.needsPTY && !ptySupported {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s requires a pseudo-terminal, which this build does not support (GOOS=%s); refusing rather than hanging on plain pipes.",
+			b.tool, runtime.GOOS,
+		)), nil
+	}
 
+	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	runErr := cmd.Run()
+	var runErr error
+	if b.needsPTY && ptySupported {
+		// Run on a pseudo-terminal: agy's agentic --print hangs on plain pipes.
+		// runOnPTY installs its own session-based process-group kill (pty.Start adds
+		// Setsid, so we must NOT also Setpgid — setpgid on a session leader is EPERM)
+		// and returns combined stdout+stderr, which we de-TTY (strip ANSI/CR) into stdout.
+		var out []byte
+		out, runErr = runOnPTY(cmd)
+		stdout.WriteString(cleanPTYOutput(out))
+	} else {
+		setupProcessGroup(cmd)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+	}
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	// If the parent context was canceled, return the cancellation error
-	// (mirrors the original gemini_agent behavior: a Go error, not a result).
+	// (mirrors the original antigravity_agent behavior: a Go error, not a result).
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -549,14 +1315,14 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if runCtx.Err() == context.DeadlineExceeded {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s timed out after %s (%s).\nPartial stdout:\n%s\nstderr:\n%s",
-			b.tool, elapsed, modeNoteStr, truncate(stdout.String(), 8000), truncate(stderr.String(), 2000),
+			b.tool, elapsed, modeNoteStr, b.failureStdout(stdout.String(), 8000), truncateTail(stderr.String(), 2000),
 		)), nil
 	}
 
 	if runErr != nil {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"%s failed (%s): %v\nstderr:\n%s\nstdout:\n%s",
-			b.tool, modeNoteStr, runErr, truncate(stderr.String(), 4000), truncate(stdout.String(), 8000),
+			b.tool, modeNoteStr, runErr, truncateTail(stderr.String(), 4000), b.failureStdout(stdout.String(), 8000),
 		)), nil
 	}
 
@@ -564,12 +1330,43 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(out) == "" {
 		out = fmt.Sprintf("(%s returned no stdout)", b.cliName)
 		if se := strings.TrimSpace(stderr.String()); se != "" {
-			out += "\nstderr:\n" + truncate(se, 2000)
+			out += "\nstderr:\n" + truncateTail(se, 2000)
 		}
 	}
 
-	header := fmt.Sprintf("[%s | %s | %s]\n\n", b.tool, modeNoteStr, elapsed)
+	header := fmt.Sprintf("[%s | %s | %s | %s]\n\n", b.tool, modeNoteStr, b.selectionNote(o), elapsed)
 	return mcp.NewToolResultText(header + out), nil
+}
+
+// ansiEscapeRE matches the terminal control sequences a CLI emits when it thinks
+// it is driving a TTY: CSI sequences (colors, cursor moves, line clears — the
+// parameter class is the full ECMA-48 range 0x30-0x3F, so colon-delimited truecolor
+// SGR like ESC[38:2:r:g:bm is covered, not just the semicolon form), OSC sequences
+// (window-title sets, terminated by either BEL or ST = ESC \), and the remaining
+// two-byte escapes. A pty-run backend's output is laced with these; we strip them so
+// the result the model receives is plain text (e.g. parseable JSON), matching what
+// the pipe-run backends already return.
+var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[@-_]")
+
+// cleanPTYOutput turns raw pseudo-terminal output into plain text: it strips ANSI
+// escape sequences and normalizes the TTY's CRLF / bare-CR line endings to LF.
+func cleanPTYOutput(b []byte) string {
+	s := ansiEscapeRE.ReplaceAllString(string(b), "")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
+}
+
+// failureStdout renders captured stdout for an error/timeout result. For a pty-run
+// backend stdout is the MERGED stdout+stderr stream and the real error (a CLI's crash
+// message, a timeout notice) lands at the TAIL, so keep the tail. Pipe backends carry
+// the error in their separate (already tail-truncated) stderr and stdout holds normal
+// output, so the HEAD is the useful part there.
+func (b backend) failureStdout(s string, limit int) string {
+	if b.needsPTY {
+		return truncateTail(s, limit)
+	}
+	return truncate(s, limit)
 }
 
 // truncate returns a copy of s truncated to at most limit bytes, without
@@ -589,4 +1386,25 @@ func truncate(s string, limit int) string {
 		i--
 	}
 	return s[:i] + fmt.Sprintf("\n…(truncated, %d bytes total)", len(s))
+}
+
+// truncateTail returns a copy of s truncated to at most limit bytes by keeping the
+// END of the string (without splitting UTF-8 runes). Use it for child stderr: a
+// CLI's real error lands at the TAIL — e.g. codex echoes the whole prompt to stderr
+// first and prints the actual error (a usage limit, an auth failure) last — so
+// head-truncation would discard exactly the line you need. Negative limit → 0.
+func truncateTail(s string, limit int) string {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(s) <= limit {
+		return s
+	}
+	// Keep the last `limit` bytes, advancing to a valid UTF-8 rune boundary so the
+	// kept slice never starts mid-rune (continuation bytes are 10xxxxxx).
+	start := len(s) - limit
+	for start < len(s) && (s[start]&0xC0 == 0x80) {
+		start++
+	}
+	return fmt.Sprintf("…(truncated, %d bytes total)\n", len(s)) + s[start:]
 }

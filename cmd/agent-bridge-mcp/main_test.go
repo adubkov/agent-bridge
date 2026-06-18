@@ -104,6 +104,31 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestTruncateTail(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "shorter than max", in: "hello", max: 10, want: "hello"},
+		{name: "equal to max", in: "hello", max: 5, want: "hello"},
+		{name: "longer ascii keeps the TAIL", in: "hello world", max: 5, want: "…(truncated, 11 bytes total)\nworld"},
+		{name: "utf-8 safe: tail starts on a rune boundary, drops the partial rune", in: "ab€cd", max: 4, want: "…(truncated, 7 bytes total)\ncd"},
+		{name: "empty string", in: "", max: 5, want: ""},
+		{name: "zero limit keeps nothing but the marker", in: "hello", max: 0, want: "…(truncated, 5 bytes total)\n"},
+		{name: "negative limit treated as zero", in: "hello", max: -1, want: "…(truncated, 5 bytes total)\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateTail(tt.in, tt.max)
+			if got != tt.want {
+				t.Errorf("truncateTail(%q, %d) = %q; want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildClaudeArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -111,9 +136,9 @@ func TestBuildClaudeArgs(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "default reason-only: task is value right after --print, no other flags",
+			name: "default reason-only: task right after --print, then the --tools \"\" no-tools lock",
 			in:   runOpts{task: "do the thing", timeoutSeconds: 300},
-			want: []string{"--print", "do the thing"},
+			want: []string{"--print", "do the thing", "--tools", ""},
 		},
 		{
 			name: "allow_tools adds --dangerously-skip-permissions after the task",
@@ -123,27 +148,42 @@ func TestBuildClaudeArgs(t *testing.T) {
 		{
 			name: "model adds --model only when non-empty",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "opus"},
-			want: []string{"--print", "ask", "--model", "opus"},
+			want: []string{"--print", "ask", "--model", "opus", "--tools", ""},
 		},
 		{
 			name: "empty/whitespace model is dropped",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "   "},
-			want: []string{"--print", "ask"},
+			want: []string{"--print", "ask", "--tools", ""},
 		},
 		{
 			name: "add_dirs becomes repeated --add-dir entries",
 			in:   runOpts{task: "ctx", timeoutSeconds: 300, addDirs: []string{"/a", "/b"}},
-			want: []string{"--print", "ctx", "--add-dir", "/a", "--add-dir", "/b"},
+			want: []string{"--print", "ctx", "--add-dir", "/a", "--add-dir", "/b", "--tools", ""},
 		},
 		{
 			name: "sandbox is ignored for claude (no --sandbox ever)",
 			in:   runOpts{task: "compute", timeoutSeconds: 300, sandbox: true},
-			want: []string{"--print", "compute"},
+			want: []string{"--print", "compute", "--tools", ""},
+		},
+		{
+			name: "effort adds --effort after the task",
+			in:   runOpts{task: "think hard", timeoutSeconds: 300, effort: "xhigh"},
+			want: []string{"--print", "think hard", "--effort", "xhigh", "--tools", ""},
+		},
+		{
+			name: "read mode appends --permission-mode plan (claude's read-only tier)",
+			in:   runOpts{task: "review", timeoutSeconds: 300, readOnly: true},
+			want: []string{"--print", "review", "--permission-mode", "plan"},
+		},
+		{
+			name: "model then effort then add-dir ordering, then --tools \"\" last",
+			in:   runOpts{task: "t", timeoutSeconds: 300, model: "opus", effort: "high", addDirs: []string{"/a"}},
+			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a", "--tools", ""},
 		},
 		{
 			name: "no --print-timeout even with a timeout set",
 			in:   runOpts{task: "wait", timeoutSeconds: 600},
-			want: []string{"--print", "wait"},
+			want: []string{"--print", "wait", "--tools", ""},
 		},
 		{
 			name: "all options combined, correct ordering, no --sandbox / no --print-timeout",
@@ -183,11 +223,26 @@ func TestBuildClaudeArgs(t *testing.T) {
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
 				t.Errorf("claudeBackend.buildArgs must start with --print <task>; got %#v", got)
 			}
+			// Reason tier MUST hard-disable tools via `--tools ""`; read/act must NOT
+			// (read uses --permission-mode plan; act passes the skip-perms flag).
+			hasToolsLock := false
+			for i := 0; i+1 < len(got); i++ {
+				if got[i] == "--tools" && got[i+1] == "" {
+					hasToolsLock = true
+				}
+			}
+			reasonMode := !tt.in.allowTools && !tt.in.readOnly
+			if reasonMode && !hasToolsLock {
+				t.Errorf(`claude reason mode must include --tools "" no-tools lock; got %#v`, got)
+			}
+			if !reasonMode && hasToolsLock {
+				t.Errorf(`claude non-reason mode must NOT include --tools ""; got %#v`, got)
+			}
 		})
 	}
 }
 
-func TestBuildGeminiArgs(t *testing.T) {
+func TestBuildAntigravityArgs(t *testing.T) {
 	tests := []struct {
 		name string
 		in   runOpts
@@ -224,6 +279,16 @@ func TestBuildGeminiArgs(t *testing.T) {
 			want: []string{"--print", "compute", "--print-timeout", "300s", "--sandbox"},
 		},
 		{
+			name: "effort is ignored for antigravity (no --effort, no -c; effort is in the model name)",
+			in:   runOpts{task: "x", timeoutSeconds: 300, effort: "high"},
+			want: []string{"--print", "x", "--print-timeout", "300s"},
+		},
+		{
+			name: "read mode is a no-op for antigravity (no readOnlyArgs; handler rejects it earlier)",
+			in:   runOpts{task: "x", timeoutSeconds: 300, readOnly: true},
+			want: []string{"--print", "x", "--print-timeout", "300s"},
+		},
+		{
 			name: "all options combined, correct ordering",
 			in: runOpts{
 				task:           "full task",
@@ -246,14 +311,14 @@ func TestBuildGeminiArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := geminiBackend.buildArgs(tt.in)
+			got := antigravityBackend.buildArgs(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("geminiBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
+				t.Errorf("antigravityBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
 			// --print must be first and the task its immediate value (so --print-timeout
 			// never lands between --print and the task).
 			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
-				t.Errorf("geminiBackend.buildArgs must start with --print <task>; got %#v", got)
+				t.Errorf("antigravityBackend.buildArgs must start with --print <task>; got %#v", got)
 			}
 		})
 	}
@@ -285,6 +350,21 @@ func TestBuildCodexArgs(t *testing.T) {
 			name: "blank model dropped; sandbox bool ignored (codex has no boolean --sandbox)",
 			in:   runOpts{task: task, timeoutSeconds: 300, model: "  ", sandbox: true},
 			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "effort emits -c model_reasoning_effort among flags, before the -- prompt",
+			in:   runOpts{task: task, timeoutSeconds: 300, effort: "high"},
+			want: []string{"exec", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "read mode == reason for codex (both --sandbox read-only)",
+			in:   runOpts{task: task, timeoutSeconds: 300, readOnly: true},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+		},
+		{
+			name: "model then effort both land before the trailing prompt",
+			in:   runOpts{task: task, timeoutSeconds: 300, model: "gpt-5.5", effort: "high"},
+			want: []string{"exec", "--model", "gpt-5.5", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
 		},
 		{
 			name: "no --print-timeout even with a custom timeout",
@@ -458,18 +538,186 @@ func TestChildHopEnv(t *testing.T) {
 	}
 }
 
+func TestDelegationDisabled(t *testing.T) {
+	tests := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "exact 1 disables", val: "1", want: true},
+		{name: "whitespace around 1 still disables", val: "  1 ", want: true},
+		{name: "unset is allowed", val: "", want: false},
+		{name: "zero is allowed (not a magic disable)", val: "0", want: false},
+		{name: "other truthy strings do not disable", val: "true", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getenv := func(k string) string {
+				if k == noDelegateEnv {
+					return tt.val
+				}
+				return ""
+			}
+			if got := delegationDisabled(getenv); got != tt.want {
+				t.Errorf("delegationDisabled(%q) = %v; want %v", tt.val, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChildDelegationEnv(t *testing.T) {
+	countND := func(env []string) int {
+		n := 0
+		for _, kv := range env {
+			if strings.HasPrefix(kv, noDelegateEnv+"=") {
+				n++
+			}
+		}
+		return n
+	}
+	tests := []struct {
+		name       string
+		env        []string
+		reasonOnly bool
+		wantFlag   bool // expect exactly one AGENT_NO_DELEGATE=1
+	}{
+		{
+			name:       "reason-only child gets the flag",
+			env:        []string{"PATH=/bin"},
+			reasonOnly: true,
+			wantFlag:   true,
+		},
+		{
+			name:       "acting child gets no flag",
+			env:        []string{"PATH=/bin"},
+			reasonOnly: false,
+			wantFlag:   false,
+		},
+		{
+			name:       "stale inherited flag is stripped for an acting child",
+			env:        []string{"PATH=/bin", noDelegateEnv + "=1", "HOME=/h"},
+			reasonOnly: false,
+			wantFlag:   false,
+		},
+		{
+			name:       "no duplicate flag when one is already present (reason-only)",
+			env:        []string{noDelegateEnv + "=1", "A=1"},
+			reasonOnly: true,
+			wantFlag:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := childDelegationEnv(tt.env, tt.reasonOnly)
+			n := countND(got)
+			if tt.wantFlag && (n != 1 || !argsContain(got, noDelegateEnv+"=1")) {
+				t.Errorf("childDelegationEnv(reasonOnly=%v) = %v; want exactly one %s=1", tt.reasonOnly, got, noDelegateEnv)
+			}
+			if !tt.wantFlag && n != 0 {
+				t.Errorf("childDelegationEnv(reasonOnly=%v) = %v; want no %s entry", tt.reasonOnly, got, noDelegateEnv)
+			}
+		})
+	}
+}
+
+func TestRunAgentNoDelegateRefuses(t *testing.T) {
+	// A reason-only parent froze delegation; runAgent must refuse before any spawn.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	t.Setenv(noDelegateEnv, "1")
+
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
+		t.Run(base.tool, func(t *testing.T) {
+			// resolveBin points at a path that would fail loudly if ever executed.
+			tb := withBin(t, base, "/nonexistent/should-not-run")
+			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+			if err != nil {
+				t.Fatalf("expected nil Go error (tool-level result), got %v", err)
+			}
+			if res == nil || !res.IsError {
+				t.Fatalf("expected an error result, got %+v", res)
+			}
+			txt := resultText(t, res)
+			if !strings.Contains(txt, base.tool) || !strings.Contains(txt, "delegation disabled") {
+				t.Errorf("no-delegate message missing tool name / disabled text: %q", txt)
+			}
+		})
+	}
+}
+
+func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
+	// A reason-only run must hand its child AGENT_NO_DELEGATE=1; an acting run must not.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	t.Setenv(noDelegateEnv, "") // this server is not itself frozen
+	// The fake echoes the flag it actually received in its environment.
+	bin := writeFakeBin(t, "#!/bin/sh\necho \"ND=[$"+noDelegateEnv+"]\"\n")
+
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
+		t.Run(base.tool, func(t *testing.T) {
+			tb := withBin(t, base, bin)
+
+			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+			if err != nil {
+				t.Fatalf("reason-only: unexpected Go error: %v", err)
+			}
+			if txt := resultText(t, res); !strings.Contains(txt, "ND=[1]") {
+				t.Errorf("reason-only child must see %s=1; got %q", noDelegateEnv, txt)
+			}
+
+			res, err = runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300, allowTools: true})
+			if err != nil {
+				t.Fatalf("allow_tools: unexpected Go error: %v", err)
+			}
+			if txt := resultText(t, res); !strings.Contains(txt, "ND=[]") {
+				t.Errorf("acting child must NOT see %s; got %q", noDelegateEnv, txt)
+			}
+		})
+	}
+}
+
+func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
+	// A failing child whose REAL error is at the END of a long stderr (like codex,
+	// which echoes the whole prompt first, then prints the actual error — e.g. a
+	// usage-limit message — last). The failure result must keep the TAIL so that
+	// error stays visible, instead of head-truncating it away.
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	// ~6.9 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
+	bin := writeFakeBin(t, "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxx\\n' 1>&2; i=$((i+1)); done\nprintf 'REAL-ERROR-AT-END\\n' 1>&2\nexit 1\n")
+	// Use a pipe-path backend (codex — exactly the case this models): its stderr is
+	// captured separately and tail-truncated. The pty-run antigravity backend instead
+	// merges stderr into one TTY stream — covered by TestRunAgentPTYMergesStderr.
+	tb := withBin(t, codexBackend, bin)
+
+	res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Fatalf("expected an error result, got %+v", res)
+	}
+	txt := resultText(t, res)
+	if !strings.Contains(txt, "REAL-ERROR-AT-END") {
+		t.Errorf("failure result dropped the tail error (head-truncated?); got:\n%s", txt)
+	}
+	if !strings.Contains(txt, "truncated,") {
+		t.Errorf("expected a truncation marker for the long stderr; got:\n%s", txt)
+	}
+}
+
 func TestResolveBinAgyEnvOverride(t *testing.T) {
 	// AGY_BIN override takes top priority and is reachable without network.
 	t.Setenv("AGY_BIN", "/custom/path/to/agy")
-	if got := geminiBackend.resolveBin(); got != "/custom/path/to/agy" {
-		t.Errorf("geminiBackend.resolveBin() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
+	if got := antigravityBackend.resolveBin(); got != "/custom/path/to/agy" {
+		t.Errorf("antigravityBackend.resolveBin() with AGY_BIN set = %q; want %q", got, "/custom/path/to/agy")
 	}
 
 	// Whitespace-only override is treated as unset (falls through to lookup/fallback,
 	// which must never be the override value).
 	t.Setenv("AGY_BIN", "   ")
-	if got := geminiBackend.resolveBin(); got == "   " {
-		t.Errorf("geminiBackend.resolveBin() treated whitespace AGY_BIN as a path: %q", got)
+	if got := antigravityBackend.resolveBin(); got == "   " {
+		t.Errorf("antigravityBackend.resolveBin() treated whitespace AGY_BIN as a path: %q", got)
 	}
 }
 
@@ -511,20 +759,20 @@ func TestModeNotes(t *testing.T) {
 		want string
 	}{
 		{
-			name: "gemini reason-only",
-			b:    geminiBackend,
+			name: "antigravity reason-only reports read tools remain (agy has no no-tools flag)",
+			b:    antigravityBackend,
 			in:   runOpts{},
-			want: "tool-use: disabled (reason/answer only)",
+			want: "tool-use: reason-only (no permission-bypass; agy keeps read tools — no no-tools flag)",
 		},
 		{
-			name: "gemini allow_tools without sandbox",
-			b:    geminiBackend,
+			name: "antigravity allow_tools without sandbox",
+			b:    antigravityBackend,
 			in:   runOpts{allowTools: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions)",
 		},
 		{
-			name: "gemini allow_tools with sandbox",
-			b:    geminiBackend,
+			name: "antigravity allow_tools with sandbox",
+			b:    antigravityBackend,
 			in:   runOpts{allowTools: true, sandbox: true},
 			want: "tool-use: ENABLED (--dangerously-skip-permissions) in --sandbox",
 		},
@@ -544,6 +792,18 @@ func TestModeNotes(t *testing.T) {
 			name: "codex reason-only is a read-only sandbox, not disabled",
 			b:    codexBackend,
 			in:   runOpts{},
+			want: "tool-use: read-only (--sandbox read-only)",
+		},
+		{
+			name: "claude read mode names plan mode",
+			b:    claudeBackend,
+			in:   runOpts{readOnly: true},
+			want: "tool-use: read-only (--permission-mode plan)",
+		},
+		{
+			name: "codex read mode is the same read-only sandbox",
+			b:    codexBackend,
+			in:   runOpts{readOnly: true},
 			want: "tool-use: read-only (--sandbox read-only)",
 		},
 		{
@@ -567,7 +827,7 @@ func TestModeNotes(t *testing.T) {
 //
 // runAgent is the shared run path for both tools. These tests inject a fake
 // executable via the backend's real binEnv override (see withBin) and drive the
-// real gemini/claude backends end-to-end — no actual agy/claude CLI is spawned.
+// real antigravity/claude backends end-to-end — no actual agy/claude CLI is spawned.
 
 // writeFakeBin writes an executable shell script to a temp dir and returns its path.
 func writeFakeBin(t *testing.T, script string) string {
@@ -605,7 +865,7 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 func TestRunAgentHopLimit(t *testing.T) {
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// depth == max => the guard must refuse before any spawn.
 			t.Setenv(hopDepthEnv, "2")
@@ -695,7 +955,7 @@ func TestRunAgentOutcomes(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			t.Run(tt.name+"/"+base.tool, func(t *testing.T) {
 				tb := withBin(t, base, writeFakeBin(t, tt.script))
 				res, err := runAgent(context.Background(), tb, runOpts{task: "do it", timeoutSeconds: 300})
@@ -711,7 +971,7 @@ func TestRunAgentParentCancel(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			// `exec` so the killed process IS the sleep (no orphaned grandchild
 			// holding the stdout pipe open past the cancellation).
@@ -737,7 +997,7 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	for _, base := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
 			// Shrink the per-backend headroom (no global mutation) so the hard
@@ -759,17 +1019,19 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 	}
 }
 
-// TestRunAgentKillsGrandchild reproduces the grandchild-pipe hang: the fake
-// child backgrounds a grandchild that inherits stdout and sleeps far past the
-// deadline, then blocks itself. Without process-group kill + WaitDelay, the
-// grandchild holds the stdout pipe open and cmd.Run() blocks for the
-// grandchild's full lifetime. The fix must make runAgent return promptly.
+// TestRunAgentKillsGrandchild reproduces the grandchild-pipe hang on the PLAIN-PIPE
+// runner (claude/codex): the fake child backgrounds a grandchild that inherits stdout
+// and sleeps far past the deadline, then blocks itself. Without process-group kill +
+// WaitDelay, the grandchild holds the stdout pipe open and cmd.Run() blocks for the
+// grandchild's full lifetime. The fix must make runAgent return promptly. (The pty
+// runner's equivalent — antigravity — is covered by TestRunAgentKillsGrandchildPTY in
+// the unix-tagged test file, since the pty path only exists there.)
 func TestRunAgentKillsGrandchild(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
 	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
-	tb := withBin(t, geminiBackend, bin)
+	tb := withBin(t, claudeBackend, bin)        // pipe backend: exercises setupProcessGroup + WaitDelay
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 
 	type out struct {
@@ -855,7 +1117,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	}
 
 	t.Run("empty/whitespace task is rejected before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			res, err := call(t, b, map[string]any{"task": "   "})
 			if err != nil {
 				t.Fatalf("[%s] unexpected Go error: %v", b.tool, err)
@@ -869,7 +1131,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("timeout defaults and clamps (gemini --print-timeout)", func(t *testing.T) {
+	t.Run("timeout defaults and clamps (antigravity --print-timeout)", func(t *testing.T) {
 		cases := []struct {
 			name string
 			args map[string]any
@@ -882,17 +1144,17 @@ func TestMakeHandlerParsing(t *testing.T) {
 			{"in range -> kept", map[string]any{"task": "x", "timeout_seconds": 600}, "600s"},
 		}
 		for _, c := range cases {
-			res, _ := call(t, geminiBackend, c.args)
+			res, _ := call(t, antigravityBackend, c.args)
 			if a := handlerEchoArgs(t, res); !argsHave(a, "--print-timeout", c.want) {
 				t.Errorf("%s: want --print-timeout %s; args=%v", c.name, c.want, a)
 			}
 		}
 	})
 
-	t.Run("sandbox gated to gemini only", func(t *testing.T) {
-		res, _ := call(t, geminiBackend, map[string]any{"task": "x", "sandbox": true})
+	t.Run("sandbox gated to antigravity only", func(t *testing.T) {
+		res, _ := call(t, antigravityBackend, map[string]any{"task": "x", "sandbox": true})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--sandbox") {
-			t.Errorf("gemini should pass --sandbox; args=%v", a)
+			t.Errorf("antigravity should pass --sandbox; args=%v", a)
 		}
 		// claude has no sandboxFlag, so b.supportsSandbox() is false and it's never read.
 		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "sandbox": true})
@@ -902,7 +1164,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("add_dirs trimmed and empties dropped", func(t *testing.T) {
-		res, _ := call(t, geminiBackend, map[string]any{
+		res, _ := call(t, antigravityBackend, map[string]any{
 			"task":     "x",
 			"add_dirs": []any{"/a", "  ", "", " /b "},
 		})
@@ -926,10 +1188,58 @@ func TestMakeHandlerParsing(t *testing.T) {
 		}
 	})
 
-	t.Run("allow_tools adds skip-permissions", func(t *testing.T) {
-		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "allow_tools": true})
+	t.Run("mode param: act / read / reason + rejections", func(t *testing.T) {
+		// act → skip-perms
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "mode": "act"})
 		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
-			t.Errorf("allow_tools should pass the skip flag; args=%v", a)
+			t.Errorf("mode=act should pass the skip flag; args=%v", a)
+		}
+		// read (claude) → --permission-mode plan, no skip-perms
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "read"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "--permission-mode", "plan") || argsContain(a, "--dangerously-skip-permissions") {
+			t.Errorf("mode=read should pass --permission-mode plan and no skip flag; args=%v", a)
+		}
+		// reason → neither
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "reason"})
+		if a := handlerEchoArgs(t, res); argsContain(a, "--dangerously-skip-permissions") || argsContain(a, "plan") {
+			t.Errorf("mode=reason should be no-tools; args=%v", a)
+		}
+		// case-insensitive
+		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "ACT"})
+		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
+			t.Errorf("mode should be case-insensitive; args=%v", a)
+		}
+		// read on antigravity → rejected (no read-only tier)
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
+			t.Errorf("antigravity mode=read should be rejected; got %q", resultText(t, res))
+		}
+		// invalid mode → rejected
+		res, _ = call(t, codexBackend, map[string]any{"task": "x", "mode": "bogus"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "invalid mode") {
+			t.Errorf("invalid mode should be rejected; got %q", resultText(t, res))
+		}
+		// mode is validated BEFORE the tier block: agy + read + tier is rejected on the
+		// read-only-mode error and never reaches `agy models` discovery (which, with the
+		// echo fake, would otherwise fail to match and yield a "could not resolve" error).
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read", "tier": "deep"})
+		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
+			t.Errorf("agy read+tier should be rejected on mode before tier discovery; got %q", resultText(t, res))
+		}
+	})
+
+	t.Run("effort: claude --effort, codex -c model_reasoning_effort, antigravity ignores", func(t *testing.T) {
+		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "effort": "xhigh"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "--effort", "xhigh") {
+			t.Errorf("claude should pass --effort xhigh; args=%v", a)
+		}
+		res, _ = call(t, codexBackend, map[string]any{"task": "x", "effort": "high"})
+		if a := handlerEchoArgs(t, res); !argsHave(a, "-c", "model_reasoning_effort=high") {
+			t.Errorf("codex should pass -c model_reasoning_effort=high; args=%v", a)
+		}
+		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "effort": "high"})
+		if a := handlerEchoArgs(t, res); argsContain(a, "--effort") || argsContain(a, "model_reasoning_effort=high") {
+			t.Errorf("antigravity must ignore effort (no lever); args=%v", a)
 		}
 	})
 
@@ -937,9 +1247,9 @@ func TestMakeHandlerParsing(t *testing.T) {
 		dir := t.TempDir()
 		// The fake writes a marker into its cwd; if working_dir applied, it lands in dir.
 		marker := writeFakeBin(t, "#!/bin/sh\ntouch cwd-marker\n")
-		h := makeHandler(withBin(t, geminiBackend, marker))
+		h := makeHandler(withBin(t, antigravityBackend, marker))
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{
-			Name:      geminiBackend.tool,
+			Name:      antigravityBackend.tool,
 			Arguments: map[string]any{"task": "x", "working_dir": dir},
 		}}
 		if _, err := h(context.Background(), req); err != nil {
@@ -951,7 +1261,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("cancelled context returns a Go error before spawning", func(t *testing.T) {
-		for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			h := makeHandler(withBin(t, b, echo))
@@ -983,7 +1293,7 @@ func writeExec(t *testing.T, dir, name string) string {
 }
 
 func TestResolveBinaryFallbacks(t *testing.T) {
-	for _, b := range []backend{geminiBackend, claudeBackend, codexBackend} {
+	for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(b.cliName, func(t *testing.T) {
 			t.Run("found on PATH via LookPath", func(t *testing.T) {
 				t.Setenv(b.binEnv, "")
@@ -1018,12 +1328,12 @@ func TestResolveBinaryFallbacks(t *testing.T) {
 	}
 }
 
-// TestBackendTimeoutHeadroom asserts the per-backend headroom: gemini (which has
+// TestBackendTimeoutHeadroom asserts the per-backend headroom: antigravity (which has
 // its own --print-timeout) gets headroom; claude (no internal timeout) gets none,
 // so its context deadline equals the requested timeout.
 func TestBackendTimeoutHeadroom(t *testing.T) {
-	if geminiBackend.timeoutHeadroom != geminiTimeoutHeadroom {
-		t.Errorf("geminiBackend.timeoutHeadroom = %v; want %v", geminiBackend.timeoutHeadroom, geminiTimeoutHeadroom)
+	if antigravityBackend.timeoutHeadroom != antigravityTimeoutHeadroom {
+		t.Errorf("antigravityBackend.timeoutHeadroom = %v; want %v", antigravityBackend.timeoutHeadroom, antigravityTimeoutHeadroom)
 	}
 	if claudeBackend.timeoutHeadroom != 0 {
 		t.Errorf("claudeBackend.timeoutHeadroom = %v; want 0 (no --print-timeout)", claudeBackend.timeoutHeadroom)
@@ -1034,15 +1344,15 @@ func TestBackendTimeoutHeadroom(t *testing.T) {
 }
 
 // TestToolSchemas verifies the deduped tool builders produce correct, accurate
-// schemas: both expose the shared params; only gemini exposes `sandbox`; and the
-// gemini description does NOT claim acting mode is sandboxed by default.
+// schemas: both expose the shared params; only antigravity exposes `sandbox`; and the
+// antigravity description does NOT claim acting mode is sandboxed by default.
 func TestToolSchemas(t *testing.T) {
-	gemini := newTool(geminiBackend)
+	antigravity := newTool(antigravityBackend)
 	claude := newTool(claudeBackend)
 	codex := newTool(codexBackend)
 
-	if gemini.Name != "gemini_agent" {
-		t.Errorf("gemini tool name = %q; want gemini_agent", gemini.Name)
+	if antigravity.Name != "antigravity_agent" {
+		t.Errorf("antigravity tool name = %q; want antigravity_agent", antigravity.Name)
 	}
 	if claude.Name != "claude_agent" {
 		t.Errorf("claude tool name = %q; want claude_agent", claude.Name)
@@ -1052,9 +1362,9 @@ func TestToolSchemas(t *testing.T) {
 	}
 
 	// Shared params present on all three.
-	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
-		if _, ok := gemini.InputSchema.Properties[p]; !ok {
-			t.Errorf("gemini tool missing shared param %q", p)
+	for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "mode"} {
+		if _, ok := antigravity.InputSchema.Properties[p]; !ok {
+			t.Errorf("antigravity tool missing shared param %q", p)
 		}
 		if _, ok := claude.InputSchema.Properties[p]; !ok {
 			t.Errorf("claude tool missing shared param %q", p)
@@ -1064,9 +1374,9 @@ func TestToolSchemas(t *testing.T) {
 		}
 	}
 
-	// sandbox is gemini-only; claude and codex must NOT expose it.
-	if _, ok := gemini.InputSchema.Properties["sandbox"]; !ok {
-		t.Error("gemini tool should expose the sandbox param")
+	// sandbox is antigravity-only; claude and codex must NOT expose it.
+	if _, ok := antigravity.InputSchema.Properties["sandbox"]; !ok {
+		t.Error("antigravity tool should expose the sandbox param")
 	}
 	if _, ok := claude.InputSchema.Properties["sandbox"]; ok {
 		t.Error("claude tool must NOT expose a sandbox param")
@@ -1075,16 +1385,35 @@ func TestToolSchemas(t *testing.T) {
 		t.Error("codex tool must NOT expose a sandbox param")
 	}
 
-	// The gemini description must not claim sandbox-by-default (the bug this fixes),
-	// and should state sandboxing is off by default.
-	if strings.Contains(gemini.Description, "by default) runs it in a restricted sandbox") {
-		t.Errorf("gemini description still claims default sandbox: %q", gemini.Description)
+	// effort is claude/codex-only; antigravity selects effort via the model name, so it
+	// must NOT expose an effort param.
+	if _, ok := claude.InputSchema.Properties["effort"]; !ok {
+		t.Error("claude tool should expose the effort param")
 	}
-	if !strings.Contains(gemini.Description, "OFF by default") {
-		t.Errorf("gemini description should state sandboxing is OFF by default: %q", gemini.Description)
+	if _, ok := codex.InputSchema.Properties["effort"]; !ok {
+		t.Error("codex tool should expose the effort param")
+	}
+	if _, ok := antigravity.InputSchema.Properties["effort"]; ok {
+		t.Error("antigravity tool must NOT expose an effort param")
 	}
 
-	// The codex description must convey that its default (allow_tools:false) is a
+	// tier appears on every backend that has presets — all three here.
+	for _, tl := range []mcp.Tool{antigravity, claude, codex} {
+		if _, ok := tl.InputSchema.Properties["tier"]; !ok {
+			t.Errorf("%s tool should expose the tier param", tl.Name)
+		}
+	}
+
+	// The antigravity description must not claim sandbox-by-default (the bug this fixes),
+	// and should state sandboxing is off by default.
+	if strings.Contains(antigravity.Description, "by default) runs it in a restricted sandbox") {
+		t.Errorf("antigravity description still claims default sandbox: %q", antigravity.Description)
+	}
+	if !strings.Contains(antigravity.Description, "OFF by default") {
+		t.Errorf("antigravity description should state sandboxing is OFF by default: %q", antigravity.Description)
+	}
+
+	// The codex description must convey that its default (mode reason/read) is a
 	// read-only sandbox, not a pure no-tools mode — the key semantic difference.
 	if !strings.Contains(codex.Description, "read-only") {
 		t.Errorf("codex description should state its default is read-only: %q", codex.Description)
@@ -1112,11 +1441,11 @@ func TestBackendRegistry(t *testing.T) {
 			if b.promptFlag != "" && b.promptPositional {
 				t.Errorf("backend %q sets both promptFlag and promptPositional (ambiguous)", b.tool)
 			}
-			// Every backend exposes allow_tools, and modeNote/buildArgs derive the
-			// enabled mode from skipPermsFlag. An empty one would render the header
+			// Every backend has an `act` tier, and modeNote/buildArgs derive the
+			// enabled note from skipPermsFlag. An empty one would render the header
 			// "tool-use: ENABLED ()" while buildArgs silently passes no skip flag.
 			if b.skipPermsFlag == "" {
-				t.Errorf("backend %q has empty skipPermsFlag; an allow_tools run would claim ENABLED with no flag", b.tool)
+				t.Errorf("backend %q has empty skipPermsFlag; an act-mode run would claim ENABLED with no flag", b.tool)
 			}
 			if seen[b.tool] {
 				t.Errorf("duplicate tool name %q in registry", b.tool)
@@ -1136,7 +1465,7 @@ func TestBackendRegistry(t *testing.T) {
 
 			// The tool must expose the shared params, and the sandbox param iff supported.
 			tool := newTool(b)
-			for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "allow_tools"} {
+			for _, p := range []string{"task", "add_dirs", "working_dir", "timeout_seconds", "model", "mode"} {
 				if _, ok := tool.InputSchema.Properties[p]; !ok {
 					t.Errorf("tool %q missing shared param %q", b.tool, p)
 				}
@@ -1144,6 +1473,158 @@ func TestBackendRegistry(t *testing.T) {
 			if _, ok := tool.InputSchema.Properties["sandbox"]; ok != b.supportsSandbox() {
 				t.Errorf("tool %q sandbox-param=%v; supportsSandbox()=%v", b.tool, ok, b.supportsSandbox())
 			}
+			// The effort param appears iff the backend has an effort lever.
+			if _, ok := tool.InputSchema.Properties["effort"]; ok != b.appliesEffort() {
+				t.Errorf("tool %q effort-param=%v; appliesEffort()=%v", b.tool, ok, b.appliesEffort())
+			}
+			// A backend that applies effort must carry a description for the param.
+			if b.appliesEffort() && b.effortDesc == "" {
+				t.Errorf("backend %q applies effort but has empty effortDesc", b.tool)
+			}
+			// tier param appears iff the backend has presets; each preset must be
+			// well-formed: a runtime-discovered model (modelMatch) needs modelListCmd,
+			// and an effort-capable backend's presets should set effort.
+			if _, ok := tool.InputSchema.Properties["tier"]; ok != (len(b.tiers) > 0) {
+				t.Errorf("tool %q tier-param=%v; len(tiers)=%d", b.tool, ok, len(b.tiers))
+			}
+			for name, spec := range b.tiers {
+				if len(spec.modelMatch) > 0 && len(b.modelListCmd) == 0 {
+					t.Errorf("backend %q tier %q has modelMatch but no modelListCmd to resolve it", b.tool, name)
+				}
+				if b.appliesEffort() && len(spec.modelMatch) == 0 && spec.effort == "" {
+					t.Errorf("backend %q tier %q sets no effort though the backend has an effort lever", b.tool, name)
+				}
+			}
+			// auth probe: an authCheck command must be paired with a parser, and vice-versa.
+			if (len(b.authCheck) > 0) != (b.authParse != nil) {
+				t.Errorf("backend %q authCheck/authParse mismatch (cmd=%v parser=%v)", b.tool, b.authCheck, b.authParse != nil)
+			}
 		})
 	}
+}
+
+func TestSupportsReadOnly(t *testing.T) {
+	// antigravity has only no-tools or full; claude (plan mode) and codex (read-only
+	// sandbox) have a read tier. This locks the per-backend `read` capability.
+	if antigravityBackend.supportsReadOnly() {
+		t.Error("antigravity_agent must NOT advertise a read-only tier")
+	}
+	if !claudeBackend.supportsReadOnly() {
+		t.Error("claude_agent should have a read-only tier (--permission-mode plan)")
+	}
+	if !codexBackend.supportsReadOnly() {
+		t.Error("codex_agent should have a read-only tier (--sandbox read-only)")
+	}
+}
+
+func TestSelectionNote(t *testing.T) {
+	tests := []struct {
+		name string
+		b    backend
+		o    runOpts
+		want string
+	}{
+		{"antigravity default", antigravityBackend, runOpts{}, "model=default"},
+		{"antigravity ignores effort (no lever)", antigravityBackend, runOpts{effort: "high"}, "model=default"},
+		{"claude model + effort", claudeBackend, runOpts{model: "opus", effort: "xhigh"}, "model=opus effort=xhigh"},
+		{"claude model only", claudeBackend, runOpts{model: "sonnet"}, "model=sonnet"},
+		{"codex default model + effort", codexBackend, runOpts{effort: "high"}, "model=default effort=high"},
+		{"claude tier echoed in header", claudeBackend, runOpts{model: "opus", effort: "xhigh", tier: "deep"}, "model=opus effort=xhigh tier=deep"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.b.selectionNote(tt.o); got != tt.want {
+				t.Errorf("selectionNote(%+v) = %q; want %q", tt.o, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPickModel(t *testing.T) {
+	const models = `Gemini 3.5 Flash (Medium)
+Gemini 3.5 Flash (High)
+Gemini 3.1 Pro (Low)
+Gemini 3.1 Pro (High)
+Claude Opus 4.6 (Thinking)`
+	tests := []struct {
+		name  string
+		out   string
+		match []string
+		want  string
+	}{
+		{"pro high", models, []string{"Pro", "(High)"}, "Gemini 3.1 Pro (High)"},
+		{"flash medium", models, []string{"Flash", "(Medium)"}, "Gemini 3.5 Flash (Medium)"},
+		{"case-insensitive", models, []string{"pro", "(high)"}, "Gemini 3.1 Pro (High)"},
+		{"no match", models, []string{"Pro", "(Ultra)"}, ""},
+		{"empty match", models, nil, ""},
+		{"first match wins", "Gemini Pro (High) A\nGemini Pro (High) B", []string{"Pro", "(High)"}, "Gemini Pro (High) A"},
+		{"skips blank lines", "\n\n  \nGemini 3.1 Pro (High)\n", []string{"Pro", "(High)"}, "Gemini 3.1 Pro (High)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickModel(tt.out, tt.match); got != tt.want {
+				t.Errorf("pickModel(%q) = %q; want %q", tt.match, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTier(t *testing.T) {
+	// Sentinel discoverer: asserts a modelMatch tier routes through discovery.
+	fakeDiscover := func(match []string) string { return "DISCOVERED:" + strings.Join(match, ",") }
+
+	t.Run("empty tier keeps explicit values", func(t *testing.T) {
+		m, e, err := resolveTier(claudeBackend, "", "opus", "high", fakeDiscover)
+		if err != nil || m != "opus" || e != "high" {
+			t.Fatalf("got (%q,%q,%v); want (opus,high,nil)", m, e, err)
+		}
+	})
+	t.Run("claude deep sets model+effort", func(t *testing.T) {
+		m, e, _ := resolveTier(claudeBackend, "deep", "", "", fakeDiscover)
+		if m != "opus" || e != "xhigh" {
+			t.Errorf("got (%q,%q); want (opus,xhigh)", m, e)
+		}
+	})
+	t.Run("explicit model/effort override tier per-field", func(t *testing.T) {
+		m, e, _ := resolveTier(claudeBackend, "deep", "sonnet", "", fakeDiscover)
+		if m != "sonnet" || e != "xhigh" {
+			t.Errorf("got (%q,%q); want (sonnet,xhigh) — model overridden, effort from tier", m, e)
+		}
+	})
+	t.Run("codex tier sets effort only; model stays default", func(t *testing.T) {
+		m, e, _ := resolveTier(codexBackend, "deep", "", "", fakeDiscover)
+		if m != "" || e != "high" {
+			t.Errorf("got (%q,%q); want (\"\",high)", m, e)
+		}
+	})
+	t.Run("agy tier discovers model, no effort lever", func(t *testing.T) {
+		m, e, _ := resolveTier(antigravityBackend, "deep", "", "", fakeDiscover)
+		if m != "DISCOVERED:Pro,(High)" || e != "" {
+			t.Errorf("got (%q,%q); want discovered model and no effort", m, e)
+		}
+	})
+	t.Run("unknown tier errors", func(t *testing.T) {
+		_, _, err := resolveTier(claudeBackend, "turbo", "", "", fakeDiscover)
+		if err == nil || !strings.Contains(err.Error(), "invalid tier") {
+			t.Errorf("want invalid-tier error; got %v", err)
+		}
+	})
+	t.Run("discovery-based tier resolving no model errors (no silent default)", func(t *testing.T) {
+		emptyDiscover := func(match []string) string { return "" }
+		_, _, err := resolveTier(antigravityBackend, "deep", "", "", emptyDiscover)
+		if err == nil || !strings.Contains(err.Error(), "could not resolve a model") {
+			t.Errorf("want could-not-resolve error when discovery yields no model; got %v", err)
+		}
+	})
+	t.Run("explicit model bypasses failed discovery", func(t *testing.T) {
+		called := false
+		emptyDiscover := func(match []string) string { called = true; return "" }
+		m, _, err := resolveTier(antigravityBackend, "deep", "Some Model", "", emptyDiscover)
+		if err != nil || m != "Some Model" {
+			t.Errorf("explicit model should win without erroring; got (%q,%v)", m, err)
+		}
+		if called {
+			t.Error("discovery must not run when model is given explicitly")
+		}
+	})
 }
