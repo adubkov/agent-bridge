@@ -668,7 +668,7 @@ var backends = []backend{
 			"deep": {model: "opus", effort: "xhigh"},
 			"fast": {model: "sonnet", effort: "medium"},
 		},
-		authCheck: []string{"auth", "status"}, // cheap, non-inference auth check
+		authCheck: []string{"auth", "status", "--json"}, // cheap, non-inference auth check; --json so parseClaudeAuth never depends on the default output shape
 		authParse: parseClaudeAuth,
 		// timeoutFlag/sandboxFlag "" — claude has neither; timeoutHeadroom 0 — deadline is the timeout.
 		description: claudeToolDescription,

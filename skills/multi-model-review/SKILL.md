@@ -93,9 +93,13 @@ Resolve each reviewer's `model`/`effort` with this precedence, highest first:
 2. **Explicit tier** the user named — "fast review" / "deep review" → apply the table above.
 3. **Default** — `deep`.
 
-Each spawn's result header echoes `model=… effort=…` actually used, so verify your override
-landed; carry the resolved model + effort into the synthesis report per reviewer (and flag
-when it came from a user override), so the user can confirm their choice took effect. The
+Each spawn's result header echoes the `model=… effort=…` the bridge resolved and passed to
+the CLI — server-side `tier` resolution included (e.g. agy's discovered model shows up
+here) — so you can confirm your override/tier was *applied by the bridge*. It reflects what
+was **sent**, not a CLI-side warn-and-fallback (e.g. Claude rejecting a bad effort, above),
+so treat it as "this value reached the CLI", not proof the CLI honored it. Carry the
+resolved model + effort into the synthesis report per reviewer (and flag when it came from a
+user override), so the user can confirm their choice took effect. The
 header's final field is that run's wall-clock elapsed — carry that per reviewer too (see
 Output format).
 
@@ -336,7 +340,8 @@ was a single-model review.
 A ranked list (table or JSON), each row: `file:line · SEVERITY · summary ·
 found-by:<model> · verified-by:<model>:<verdict>`. Lead with a one-line note of which
 models participated and at what tier/effort (and any user overrides) — each spawn's result
-header reports the `model=… effort=…` it actually ran, so report that, not your intent.
+header reports the `model=… effort=…` the bridge resolved and passed to the CLI, so report
+that, not your intent (it's the value sent, not proof the CLI honored it — see above).
 
 **Report per-agent timing.** Every spawn's result header ends with that run's wall-clock —
 the full shape is `[<tool> | <mode-note> | model=… effort=… tier=… | <elapsed>]`, e.g.

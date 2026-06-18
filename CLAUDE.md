@@ -7,8 +7,9 @@ registry (`backends` in [main.go](cmd/agent-bridge-mcp/main.go)); the tool descr
 there are the **source of truth** for per-backend behavior. See [README.md](README.md) for
 the user-facing docs and [skills/](skills/) for the playbooks.
 
-The server also registers a no-spawn **`list_agents`** discovery tool (probe
-`installed`/`auth`/`serve`; see [discover.go](cmd/agent-bridge-mcp/discover.go)) and a
+The server also registers a **`list_agents`** discovery tool (takes no `task` — it
+never spawns a worker; but probe depth scales cost: `installed` no-spawn,
+`auth`/`serve` shell out; see [discover.go](cmd/agent-bridge-mcp/discover.go)) and a
 **`tier`** param (`deep`/`fast`) that resolves model+effort per backend as registry data
 (`tiers`/`tierSpec`) — for agy the model is discovered from `agy models` at runtime
 (`discoverModel`, process-cached), claude/codex carry explicit presets. The pure

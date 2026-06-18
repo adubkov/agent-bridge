@@ -100,7 +100,7 @@ entry per backend.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
-| `probe` | string | `installed` | Depth: `installed` (resolve the CLI via `binEnv`/PATH only — **cheap, no spawn**) · `auth` (also run the CLI's own cheap auth/health command — `claude auth status`, `codex doctor --json`; **agy has none, so its auth is reported `unknown`**) · `serve` (**authoritative**: a real PONG round-trip per backend — proves it can serve requests but costs a model call; agy can take minutes). |
+| `probe` | string | `installed` | Depth: `installed` (resolve the CLI via `binEnv`/PATH only — **cheap, no spawn**) · `auth` (also run the CLI's own cheap auth/health command — `claude auth status --json`, `codex doctor --json`; **agy has none, so its auth is reported `unknown`**) · `serve` (**authoritative**: a real PONG round-trip per backend — proves it can serve requests but costs a model call; agy can take minutes). |
 | `timeout_seconds` | number | 15 (auth) / 120 (serve) | Per-backend timeout for the auth/serve probes (max 1800). Ignored for `installed`. agy's `serve` round-trip may need ≥300. |
 
 Each entry carries `{tool, cli, installed, path, source}`; the `auth` probe adds `authed`
