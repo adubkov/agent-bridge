@@ -95,7 +95,9 @@ Resolve each reviewer's `model`/`effort` with this precedence, highest first:
 
 Each spawn's result header echoes `model=… effort=…` actually used, so verify your override
 landed; carry the resolved model + effort into the synthesis report per reviewer (and flag
-when it came from a user override), so the user can confirm their choice took effect.
+when it came from a user override), so the user can confirm their choice took effect. The
+header's final field is that run's wall-clock elapsed — carry that per reviewer too (see
+Output format).
 
 ## Independence — who should review
 
@@ -306,6 +308,8 @@ set) rather than trusting a blind REFUTED.
 - **Rank** by severity (HIGH → LOW), correctness over style.
 - Report each finding with **provenance**: which model found it, which verified it,
   and the verdict.
+- Report **per-agent timing**: every spawn's result header ends with its wall-clock
+  elapsed, so give each reviewer (finder and verifier) its measured time — see Output format.
 - State **which models actually ran** and any skipped (CLI unavailable) — diversity
   is the whole value, so be honest when it was reduced.
 
@@ -333,6 +337,18 @@ A ranked list (table or JSON), each row: `file:line · SEVERITY · summary ·
 found-by:<model> · verified-by:<model>:<verdict>`. Lead with a one-line note of which
 models participated and at what tier/effort (and any user overrides) — each spawn's result
 header reports the `model=… effort=…` it actually ran, so report that, not your intent.
+
+**Report per-agent timing.** Every spawn's result header ends with that run's wall-clock —
+the full shape is `[<tool> | <mode-note> | model=… effort=… tier=… | <elapsed>]`, e.g.
+`[claude_agent | … | model=opus effort=xhigh tier=deep | 7m35.515s]`. So you already have an
+exact duration for every finder and verifier — don't time anything yourself, just read the
+last header field. Surface it: a per-reviewer table above the findings
+(`agent · model · effort · time · #findings` for finders, and each verifier's `time` next to
+its verdict), plus the wall-clock of each wave (≈ the slowest finder, then ≈ the slowest
+verifier on a concurrent host; the sum of every call on a serializing host). This makes each
+model's cost/latency concrete and lets the user trade tier or Fast mode against time on the
+next run. (agy's latency is especially variable — see Caveats — so its measured time is worth
+showing.)
 
 ## Using this from Claude Code, Antigravity, or Codex
 
