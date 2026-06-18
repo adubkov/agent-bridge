@@ -156,7 +156,13 @@ func (b backend) checkAuth(ctx context.Context, timeout time.Duration) (authed, 
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, b.resolveBin(), b.authCheck...).CombinedOutput()
+	// Harden the spawn like runAgent: WaitDelay + a process-group kill so a stray
+	// grandchild that inherits the pipes can't keep CombinedOutput blocked past the
+	// context deadline.
+	cmd := exec.CommandContext(cctx, b.resolveBin(), b.authCheck...)
+	cmd.WaitDelay = childWaitDelay
+	setupProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
 	if cctx.Err() == context.DeadlineExceeded {
 		return "unknown", fmt.Sprintf("auth check timed out after %s", timeout)
 	}
@@ -258,7 +264,7 @@ func (b backend) checkServe(ctx context.Context, timeout time.Duration) (ready b
 	if res != nil && res.IsError {
 		return false, latencyMS, firstLine(txt)
 	}
-	if strings.Contains(strings.ToUpper(txt), "PONG") {
+	if isPongReply(txt) {
 		return true, latencyMS, ""
 	}
 	return false, latencyMS, "no PONG in reply"
@@ -277,6 +283,20 @@ func toolResultText(res *mcp.CallToolResult) string {
 		}
 	}
 	return sb.String()
+}
+
+// isPongReply reports whether txt is a genuine PONG round-trip. checkServe asks the model
+// to "Reply with exactly the word: PONG", so success means some LINE of the reply is just
+// PONG (after trimming whitespace and surrounding punctuation). A whole-line match — not a
+// substring — is what excludes both runAgent's "[<tool> | …]" header line and a refusal
+// that merely mentions the word ("no PONG", "I cannot output PONG").
+func isPongReply(txt string) bool {
+	for _, line := range strings.Split(strings.ToUpper(txt), "\n") {
+		if strings.Trim(line, " \t\r`.,!?:;\"'*") == "PONG" {
+			return true
+		}
+	}
+	return false
 }
 
 // firstLine returns the first non-empty trimmed line of s (for compact detail notes).

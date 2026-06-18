@@ -32,8 +32,8 @@
 // Scope read/act runs with `working_dir`. For antigravity_agent the `--sandbox` flag is
 // OFF by default; note it applies agy's "terminal restrictions" but does NOT keep file
 // edits out of `working_dir` (verified: a write under --sandbox landed in working_dir), so
-// it is not a "don't touch my files" guard — point `working_dir` at a throwaway dir (or
-// omit it) to keep agy off your files. claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
+// it is not a "don't touch my files" guard — point `working_dir` at a throwaway dir to keep
+// agy off your files. claude_agent has NO sandbox option. codex_agent has no pure no-tools mode, so its
 // default (`mode: "reason"`/`"read"`) runs it in a read-only sandbox
 // (--sandbox read-only) rather than fully disabling tools. The tool result header
 // always reports which mode ran.
@@ -47,9 +47,9 @@
 // does not gate writes behind skip-perms, so a `reason` antigravity_agent pointed at
 // a writable `working_dir` can still edit files unattended — and `--sandbox` does NOT
 // confine those edits (it is terminal restrictions only; a write under it still lands in
-// working_dir, verified). The only real guard is WHERE it runs: withhold `working_dir`
-// (a reading backend then sees the server's cwd, not the repo), or point it at a throwaway
-// dir/worktree, to keep agy off your files.
+// working_dir, verified). The only real guard is WHERE it runs: point `working_dir` at a
+// throwaway dir/worktree. Omitting `working_dir` is NOT a guard for agy — it then runs in
+// the bridge server's own cwd, which is often your project tree.
 //
 // Loop guard: to prevent runaway A→B→A→B delegation chains, the shared run path
 // reads AGENT_HOP_DEPTH (current delegation depth, default 0) and AGENT_HOP_MAX
@@ -418,7 +418,7 @@ var modelCache sync.Map // key: cliName + "\x00" + join(match); val: string
 // `match` (see pickModel), memoized. Returns "" on any error/miss so the caller falls
 // back to the CLI default. NOT pure (spawns a subprocess) — deliberately kept out of
 // buildArgs so that stays table-testable.
-func (b backend) discoverModel(match []string) string {
+func (b backend) discoverModel(ctx context.Context, match []string) string {
 	if len(b.modelListCmd) == 0 || len(match) == 0 {
 		return ""
 	}
@@ -426,9 +426,16 @@ func (b backend) discoverModel(match []string) string {
 	if v, ok := modelCache.Load(key); ok {
 		return v.(string)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Bound by the caller's context (so a canceled/timed-out request stops the probe)
+	// under a short cap of its own — listing models should be near-instant. Harden the
+	// spawn like runAgent: WaitDelay + a process-group kill so a stray grandchild that
+	// inherits the pipes can't keep .Output() blocked past the deadline.
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, b.resolveBin(), b.modelListCmd...).Output()
+	cmd := exec.CommandContext(cctx, b.resolveBin(), b.modelListCmd...)
+	cmd.WaitDelay = childWaitDelay
+	setupProcessGroup(cmd)
+	out, err := cmd.Output()
 	model := ""
 	if err == nil {
 		model = pickModel(string(out), match)
@@ -445,7 +452,7 @@ func (b backend) discoverModel(match []string) string {
 // fallback matters because a parent agent may spawn this server with a minimal PATH.
 func (b backend) locate() (path, source string, found bool) {
 	if v := strings.TrimSpace(os.Getenv(b.binEnv)); v != "" {
-		if _, err := os.Stat(v); err == nil {
+		if isExecutableFile(v) {
 			return v, "env", true
 		}
 		return v, "env", false
@@ -455,11 +462,27 @@ func (b backend) locate() (path, source string, found bool) {
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		fallback := filepath.Join(home, ".local", "bin", b.cliName)
-		if _, statErr := os.Stat(fallback); statErr == nil {
+		if isExecutableFile(fallback) {
 			return fallback, "local-bin", true
 		}
 	}
 	return b.cliName, "", false
+}
+
+// isExecutableFile reports whether path is a regular file the OS can execute. locate's
+// binEnv and local-bin branches use it so a directory or a non-executable file is NOT
+// reported as an installed CLI (a later spawn would fail with is-a-directory/permission).
+// The PATH branch relies on exec.LookPath, which already enforces this. Windows has no
+// execute bit, so there a regular file is accepted (PATHEXT/LookPath governs PATH lookups).
+func isExecutableFile(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return fi.Mode()&0o111 != 0
 }
 
 // resolveBin returns the path to the backend's CLI — the resolved executable, or the
@@ -855,7 +878,14 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 				return mcp.NewToolResultError(fmt.Sprintf(
 					"%s: no tier presets — set `model`/`effort` explicitly instead.", b.tool)), nil
 			}
-			model, effort, terr := resolveTier(b, tier, o.model, o.effort, b.discoverModel)
+			// Enforce the delegation freeze / hop limit BEFORE resolving the tier: agy's
+			// tier model discovery shells out to `agy models`, and a child that will be
+			// refused at spawn time must not run any subprocess first.
+			if res := delegationGuard(b.tool); res != nil {
+				return res, nil
+			}
+			discover := func(match []string) string { return b.discoverModel(ctx, match) }
+			model, effort, terr := resolveTier(b, tier, o.model, o.effort, discover)
 			if terr != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("%s: %v", b.tool, terr)), nil
 			}
@@ -905,34 +935,45 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 	}
 }
 
+// delegationGuard returns a non-nil error result when this process must refuse to spawn
+// a child: a reason-only parent froze it (AGENT_NO_DELEGATE=1), or it has reached the
+// hop-depth limit (AGENT_HOP_DEPTH >= AGENT_HOP_MAX). makeHandler consults it BEFORE
+// resolving a tier — so a child that will be refused never shells out to `<cli> models`
+// for tier model discovery first — and runAgent re-checks it as the authoritative gate.
+func delegationGuard(tool string) *mcp.CallToolResult {
+	// Reason-only freeze: stricter than (and independent of) the hop-depth counter.
+	if delegationDisabled(os.Getenv) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s: delegation disabled (%s=1). This agent was spawned reason-only by a parent "+
+				"agent and may not spawn further agents. Perform this task directly instead of delegating.",
+			tool, noDelegateEnv,
+		))
+	}
+	// Loop guard: refuse once the delegation depth limit is reached (runaway A→B→A→B).
+	if depth, hopMax := parseHopEnv(os.Getenv); hopLimitReached(depth, hopMax) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"%s: delegation-depth limit reached (%s=%d, %s=%d). "+
+				"Refusing to spawn another agent to avoid a runaway delegation loop. "+
+				"Perform this task directly instead of delegating further.",
+			tool, hopDepthEnv, depth, hopMaxEnv, hopMax,
+		))
+	}
+	return nil
+}
+
 // runAgent is the shared backend run path: hop guard, command construction,
 // timeout/context handling, truncation, and header formatting. Tool-level
 // failures (timeout, child error, hop limit) are encoded as MCP error results
 // with a nil Go error; only parent-context cancellation returns a Go error,
 // mirroring the original antigravity_agent behavior.
 func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, error) {
-	// Reason-only freeze: a reason-only parent set AGENT_NO_DELEGATE, so this
-	// agent may not spawn any child (it should only reason, not act). Independent
-	// of — and stricter than — the hop-depth counter below.
-	if delegationDisabled(os.Getenv) {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"%s: delegation disabled (%s=1). This agent was spawned reason-only by a parent "+
-				"agent and may not spawn further agents. Perform this task directly instead of delegating.",
-			b.tool, noDelegateEnv,
-		)), nil
+	// Refuse to spawn if frozen reason-only or at the hop-depth limit. makeHandler also
+	// checks this before tier resolution; runAgent re-checks for direct callers (e.g.
+	// checkServe) and is the authoritative gate.
+	if res := delegationGuard(b.tool); res != nil {
+		return res, nil
 	}
-
-	// Loop guard: refuse to spawn a child once the delegation depth limit is
-	// reached, to prevent runaway A→B→A→B chains.
-	depth, hopMax := parseHopEnv(os.Getenv)
-	if hopLimitReached(depth, hopMax) {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"%s: delegation-depth limit reached (%s=%d, %s=%d). "+
-				"Refusing to spawn another agent to avoid a runaway delegation loop. "+
-				"Perform this task directly instead of delegating further.",
-			b.tool, hopDepthEnv, depth, hopMaxEnv, hopMax,
-		)), nil
-	}
+	depth, _ := parseHopEnv(os.Getenv)
 
 	args := b.buildArgs(o)
 	modeNoteStr := b.modeNote(o)

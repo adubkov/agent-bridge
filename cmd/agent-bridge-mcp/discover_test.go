@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,28 @@ func TestLocateSource(t *testing.T) {
 		path, source, found := b.locate()
 		if found || source != "env" || path != miss {
 			t.Errorf("got (%q,%q,%v); want (%q,env,false)", path, source, found, miss)
+		}
+	})
+	t.Run("binEnv override that is a directory -> not found", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv(b.binEnv, dir)
+		path, source, found := b.locate()
+		if found || source != "env" || path != dir {
+			t.Errorf("got (%q,%q,%v); want (%q,env,false)", path, source, found, dir)
+		}
+	})
+	t.Run("binEnv override that is non-executable -> not found", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("no execute bit on windows")
+		}
+		p := filepath.Join(t.TempDir(), "noexec")
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o644); err != nil {
+			t.Fatalf("write non-exec: %v", err)
+		}
+		t.Setenv(b.binEnv, p)
+		path, source, found := b.locate()
+		if found || source != "env" || path != p {
+			t.Errorf("got (%q,%q,%v); want (%q,env,false)", path, source, found, p)
 		}
 	})
 	t.Run("PATH hit -> path/found", func(t *testing.T) {
@@ -60,6 +83,34 @@ func TestLocateSource(t *testing.T) {
 			t.Errorf("got (%q,%q,%v); want (%q,\"\",false)", path, source, found, b.cliName)
 		}
 	})
+}
+
+func TestIsPongReply(t *testing.T) {
+	cases := []struct {
+		txt  string
+		want bool
+	}{
+		{"PONG", true},
+		{"pong", true},
+		{"PONG\n", true},
+		{"  PONG  ", true},
+		{"PONG!", true},
+		{"**PONG**", true},
+		{"no PONG", false},
+		{"I cannot output PONG", false},
+		{"PONGO", false},
+		{"", false},
+		{"   ", false},
+		// runAgent wraps the model reply with a "[<tool> | …]" header line; PONG on its
+		// own body line is ready, a refusal in the body is not.
+		{"[claude_agent | tool-use: read-only | model=opus | 0.1s]\n\nPONG", true},
+		{"[claude_agent | tool-use: read-only | model=opus | 0.1s]\n\nI cannot output PONG", false},
+	}
+	for _, c := range cases {
+		if got := isPongReply(c.txt); got != c.want {
+			t.Errorf("isPongReply(%q) = %v; want %v", c.txt, got, c.want)
+		}
+	}
 }
 
 func TestParseClaudeAuth(t *testing.T) {
