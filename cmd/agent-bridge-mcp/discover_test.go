@@ -207,6 +207,34 @@ func TestListAgentsInstalled(t *testing.T) {
 	}
 }
 
+func TestProbeBackendBrokenOverride(t *testing.T) {
+	// A binEnv override that is set but unusable must NOT collapse to a bare
+	// {installed:false} with empty path/source — even at probe=installed depth the
+	// operator needs to tell "override misconfigured" apart from "CLI absent".
+	b := claudeBackend
+	miss := filepath.Join(t.TempDir(), "nope")
+	t.Setenv(b.binEnv, miss)
+	st := probeBackend(context.Background(), b, probeInstalled, 0)
+	if st.Installed {
+		t.Errorf("installed=true; want false for a broken override")
+	}
+	if st.Path != miss || st.Source != "env" {
+		t.Errorf("got path=%q source=%q; want path=%q source=env", st.Path, st.Source, miss)
+	}
+	if !strings.Contains(st.Detail, miss) || !strings.Contains(st.Detail, "not an executable file") {
+		t.Errorf("detail=%q; want it to name the override path and the reason", st.Detail)
+	}
+
+	// Contrast: a genuinely absent CLI (no override, not on PATH) stays a clean
+	// {installed:false} with empty path/source/detail.
+	t.Setenv(b.binEnv, "")
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	if st := probeBackend(context.Background(), b, probeInstalled, 0); st.Installed || st.Path != "" || st.Source != "" || st.Detail != "" {
+		t.Errorf("absent CLI: got installed=%v path=%q source=%q detail=%q; want clean not-found", st.Installed, st.Path, st.Source, st.Detail)
+	}
+}
+
 func TestListAgentsProbeValidation(t *testing.T) {
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{"probe": "bogus"}}}
 	res, _ := listAgentsHandler(context.Background(), req)

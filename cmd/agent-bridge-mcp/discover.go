@@ -142,6 +142,14 @@ func probeBackend(ctx context.Context, b backend, probe string, timeout time.Dur
 	st := agentStatus{Tool: b.tool, CLI: b.cliName, Installed: found}
 	if found {
 		st.Path, st.Source = path, source
+	} else if source != "" {
+		// locate() reports a non-empty source only for a binEnv override that is set
+		// but unusable (missing / non-executable / a directory). Surface the path,
+		// source, and a note even at probe=installed depth, so an operator can tell a
+		// misconfigured *_BIN override apart from a CLI that is simply absent — both
+		// otherwise collapse to {installed:false} with an empty path/source/detail.
+		st.Path, st.Source = path, source
+		st.Detail = fmt.Sprintf("%s is set to %q but it is not an executable file", b.binEnv, path)
 	}
 	if !found || probe == probeInstalled {
 		return st

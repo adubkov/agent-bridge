@@ -50,11 +50,14 @@ TOOL_codex  := codex_agent
 ## smoke-codex: smoke-test just codex_agent (clean temp dir; needs codex authed)
 smoke-antigravity smoke-claude smoke-codex: smoke-%: build
 	@mkdir -p /tmp/agent-bridge-mcp-smoke-$*
-	@printf '%s\n' \
+	@out="$$(printf '%s\n' \
 	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"$(TOOL_$*)","arguments":{"task":"Reply with exactly the word: PONG","working_dir":"/tmp/agent-bridge-mcp-smoke-$*","timeout_seconds":120}}}' \
-	| ./$(BINARY) | grep -q PONG && echo "smoke-$* OK" || (echo "smoke-$* FAILED"; exit 1)
+	| ./$(BINARY))"; \
+	printf '%s' "$$out" | grep -q PONG \
+	  && ! printf '%s' "$$out" | grep -qE ' failed \(| timed out after ' \
+	  && echo "smoke-$* OK" || (echo "smoke-$* FAILED"; exit 1)
 
 ## smoke-list-agents: smoke-test the list_agents discovery tool (probe=installed; needs no
 ##                    CLIs authed — it only resolves them on PATH, no spawn)
@@ -66,13 +69,18 @@ smoke-list-agents: build
 	| ./$(BINARY) | grep -q installed && echo "smoke-list-agents OK" || (echo "smoke-list-agents FAILED"; exit 1)
 
 ## smoke-parallel: smoke-test the parallel_agents fan-out tool — runs two claude reason
-##                 jobs concurrently and checks both job dividers appear (needs claude authed)
+##                 jobs concurrently and checks both job dividers appear, that the fan-out
+##                 reported zero job errors, and that the PONG reply came back (needs claude authed)
 smoke-parallel: build
-	@printf '%s\n' \
+	@out="$$(printf '%s\n' \
 	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
 	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"parallel_agents","arguments":{"jobs":[{"agent":"claude_agent","mode":"reason","tier":"fast","task":"Reply with exactly the word: PONG"},{"agent":"claude_agent","mode":"reason","tier":"fast","task":"Reply with exactly the word: PONG"}]}}}' \
-	| ./$(BINARY) | grep -q "job 1: claude_agent" && echo "smoke-parallel OK" || (echo "smoke-parallel FAILED"; exit 1)
+	| ./$(BINARY))"; \
+	printf '%s' "$$out" | grep -q "job 1: claude_agent" \
+	  && printf '%s' "$$out" | grep -q "0 reported error(s)" \
+	  && printf '%s' "$$out" | grep -q PONG \
+	  && echo "smoke-parallel OK" || (echo "smoke-parallel FAILED"; exit 1)
 
 ## install-claude: register this repo as a local marketplace and install the plugin into
 ##                 Claude Code (loads the skills AND the agent-bridge MCP server).
