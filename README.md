@@ -229,7 +229,7 @@ Code afterward (MCP loads at session start); run `/mcp` and `/plugin` to confirm
 tools appear as `antigravity_agent`, `claude_agent`, and `codex_agent`.
 
 This repo is a Claude Code **plugin** (`agent-bridge`): installing it wires the MCP
-server *and* ships the skills (`skills/agent-bridge` for delegating to Antigravity, and
+server *and* ships the skills (`skills/delegate` for tiered task delegation, and
 `skills/multi-model-review` for cross-model reviews). Claude discovers plugins through
 **marketplaces**, so the repo carries a single-plugin local marketplace
 (`.claude-plugin/marketplace.json`); `make install-claude` registers it and installs
@@ -309,7 +309,7 @@ The Claude-format plugin bundles:
 - `.claude-plugin/plugin.json` — plugin manifest.
 - `.claude-plugin/marketplace.json` — single-plugin local marketplace (`agent-bridge-local`).
 - `.mcp.json` — registers the `agent-bridge` MCP server (`${CLAUDE_PLUGIN_ROOT}/agent-bridge-mcp`).
-- `skills/agent-bridge/` + `skills/multi-model-review/` — the delegation and cross-model-review skills.
+- `skills/delegate/` + `skills/multi-model-review/` — the delegation and cross-model-review skills.
 
 ## Install into Codex
 
