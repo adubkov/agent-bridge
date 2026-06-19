@@ -27,7 +27,17 @@ Both rest on the same core discipline (the **handoff spec**) and the same **veri
 
 ## When to delegate — and when not
 
-Delegate when the work is **self-contained and delegable**, and a sub-agent's
+**Delegate only when the user has explicitly asked for it — it is opt-in, never automatic.**
+Delegate a task only when the user requested it for *that* task: by naming it ("delegate
+this", "have Flash implement it", "spin this off to a sub-agent", "run these in parallel"),
+or by a standing instruction to delegate. For any task the user has *not* asked to delegate,
+**do the work yourself in-session** — even when it looks like an ideal delegation candidate.
+When something is a strong fit but the user hasn't asked, you may briefly *offer* to
+delegate; do not act on it unprompted. (This skill stays loaded in context across later
+turns once triggered — that persistence must **not** turn into delegating subsequent tasks
+on your own; re-confirm an explicit request each time.)
+
+Once the user *has* asked, these are the work shapes where a sub-agent's
 speed/throughput/cost or its *independent* perspective is the win:
 
 - **Mechanical bulk edits** — rename a symbol across a package, apply a repetitive
