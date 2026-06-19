@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Use to delegate coding work to spawned sub-agents via the agent-bridge MCP tools (`antigravity_agent` / `claude_agent` / `codex_agent`). Two shapes — (1) hand ONE self-contained task to a fast/cheap agent while you keep orchestrating (mechanical bulk edits, broad exploration, a first-pass draft, a second opinion); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers picking the model tier (deep/fast) per phase, writing the self-contained handoff spec, scoping/isolating an acting executor, fanning independent chunks out with `parallel_agents`, and the verify loop. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
+description: Use when the user EXPLICITLY asks to delegate coding work to a different model family via the agent-bridge MCP tools (`antigravity_agent`/Gemini, `claude_agent`, `codex_agent`) — triggers like "delegate this", "have Gemini Flash implement it", "use Codex for X", or "via agent-bridge". Two shapes — (1) hand ONE self-contained task to a fast/cheap cross-model agent while you keep orchestrating (mechanical bulk edits, a first-pass draft, an independent second opinion); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers tier selection (deep/fast), the self-contained handoff spec, scoping/isolating an acting executor, concurrent fan-out via `parallel_agents`, and the verify loop. This is explicit CROSS-MODEL delegation via agent-bridge — NOT the host's native subagent/Task or workflow tools; do not trigger on a bare "subagent" or "run in parallel" request that does not name agent-bridge or a cross-model backend. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
 ---
 
 # Delegating work to sub-agents (agent-bridge)
@@ -28,14 +28,21 @@ Both rest on the same core discipline (the **handoff spec**) and the same **veri
 ## When to delegate — and when not
 
 **Delegate only when the user has explicitly asked for it — it is opt-in, never automatic.**
-Delegate a task only when the user requested it for *that* task: by naming it ("delegate
-this", "have Flash implement it", "spin this off to a sub-agent", "run these in parallel"),
-or by a standing instruction to delegate. For any task the user has *not* asked to delegate,
-**do the work yourself in-session** — even when it looks like an ideal delegation candidate.
-When something is a strong fit but the user hasn't asked, you may briefly *offer* to
-delegate; do not act on it unprompted. (This skill stays loaded in context across later
-turns once triggered — that persistence must **not** turn into delegating subsequent tasks
-on your own; re-confirm an explicit request each time.)
+The trigger is the word **delegate**, or an explicit agent-bridge reference: a named backend
+or cross-model intent ("use Gemini Flash / Codex / `claude_agent`", "via agent-bridge", "spawn
+a Gemini/Codex agent to …"). That — for *that* task — is the request.
+
+**Do not** treat the generic phrases "subagent", "spawn an agent", or "run these in parallel"
+as triggers on their own: in Claude Code (and other hosts) those name the host's **native**
+Task/subagent or workflow tools, **not** this cross-model bridge. If the user says one of them
+*without* naming agent-bridge or a cross-model backend, it is a native request — leave it to
+the host and do **not** trigger here.
+
+For any task the user has *not* explicitly asked to delegate, **do the work yourself
+in-session** — even when it looks like an ideal candidate. When something is a strong fit but
+the user hasn't asked, you may briefly *offer* to delegate; do not act on it unprompted. (This
+skill stays loaded in context across later turns once triggered — that persistence must **not**
+turn into delegating subsequent tasks on your own; re-confirm an explicit request each time.)
 
 Once the user *has* asked, these are the work shapes where a sub-agent's
 speed/throughput/cost or its *independent* perspective is the win:
@@ -148,18 +155,24 @@ The execute phase needs **`mode: "act"`** (writes + commands). Contain it:
 
 - **Always scope `working_dir`** to the repo (absolute path). Without it the agent runs in
   the *bridge server's own cwd* — often your project tree, but not guaranteed.
-- **Isolate with a throwaway `git worktree`** when you want to review before the edits touch
-  your live checkout (and to keep concurrent executors from colliding). The executor works
-  in the worktree; you review its diff there, then merge:
+- **A throwaway `git worktree` is OPTIONAL when the changes are intended.** You *want* the
+  writes here, so the worktree is **not** a safety requirement — it's a review/containment
+  convenience. Pointing `working_dir` at the repo (ideally a **clean feature branch**) and
+  reviewing `git diff` afterward is a perfectly good, simpler flow. Reach for a separate
+  worktree when you (a) have unrelated uncommitted changes you don't want mixed with the
+  agent's, (b) run **multiple** executors in parallel (they'd clobber a shared tree), or
+  (c) want a clean review-then-merge gate / to bound a broad edit's blast radius:
   ```sh
   wt="$(mktemp -d)/wt"; git worktree add "$wt" -b feat/x HEAD   # point working_dir here
-  # … executor runs in $wt … then review and merge, finally:
+  # … executor runs in $wt … then review its diff and merge, finally:
   git worktree remove "$wt"
   ```
-- **agy has no write-safe tier and `--sandbox` is NOT a write guard** (it's terminal
-  restrictions only — a write under it still lands in `working_dir`, verified). For an
-  *acting* agy executor this is intended; the worktree is what keeps it off your main tree.
-  Also: a `reason`/no-`working_dir` agy run is **not** hands-off — see Caveats.
+- **The agy "no write-safe tier / `--sandbox` isn't a guard" caveat is about *non-acting*
+  runs, not this one.** When agy is *acting* you want the writes, so that caveat is moot —
+  any worktree you use is for review/containment (above), not a write-guard. It bites only
+  when you *don't* want writes: a `reason` agy run has no read-only tier and can still edit
+  unattended in a writable `working_dir`, so there the throwaway dir is the actual guard (see
+  the `multi-model-review` skill and Caveats).
 - **Verify after, every time** — the executor's "done" is a claim, not proof.
 
 ## Parallel decomposition (`parallel_agents`)
@@ -223,9 +236,10 @@ Then review the diff and run the build yourself.
    constraints, and the acceptance command. (Or delegate a deep pass to
    `claude_agent tier:"deep"` if you want a fresh heavy design.)
 2. **Execute** (Flash): hand the spec to `antigravity_agent` with `tier: "fast"`,
-   `mode: "act"`, `working_dir` pointed at a throwaway worktree. If the spec splits into
-   independent files, fan the chunks out in one `parallel_agents` call (disjoint files or
-   separate worktrees).
+   `mode: "act"`, `working_dir` at the repo — a **clean feature branch**, or a throwaway
+   worktree if you want a review-then-merge gate (see Execution safety). If the spec splits
+   into independent files, fan the chunks out in one `parallel_agents` call (disjoint files
+   or separate worktrees).
 3. **Verify** (you): review the worktree diff, run the build/tests, loop with a corrective
    follow-up on any failure, then merge.
 
