@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Use when the user EXPLICITLY asks to delegate coding work to a different model family via the agent-bridge MCP tools (`antigravity_agent`/Gemini, `claude_agent`, `codex_agent`) — triggers like "delegate this", "have Gemini Flash implement it", "use Codex for X", "get a second opinion from another model / cross-check across models", or "via agent-bridge". Two shapes — (1) hand ONE self-contained task to a fast/cheap cross-model agent while you keep orchestrating (mechanical bulk edits, a first-pass draft, an independent second opinion — a diverse multi-model panel by default); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers tier selection (deep/fast), the self-contained handoff spec, scoping/isolating an acting executor, concurrent fan-out via `parallel_agents`, and the verify loop. This is explicit CROSS-MODEL delegation via agent-bridge — NOT the host's native subagent/Task or workflow tools; do not trigger on a bare "subagent" or "run in parallel" request that does not name agent-bridge or a cross-model backend. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
+description: Use when the user EXPLICITLY asks to delegate coding work to a different model family via the agent-bridge MCP tools (`antigravity_agent`/Gemini, `claude_agent`, `codex_agent`) — triggers like "delegate this", "have Gemini Flash implement it", "use Codex for X", "get a second opinion from another model", "cross-check this design/decision across models", or "via agent-bridge". Two shapes — (1) hand ONE self-contained task to a fast/cheap cross-model agent while you keep orchestrating (mechanical bulk edits, a first-pass draft, an independent second opinion — a diverse multi-model panel by default); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers tier selection (deep/fast), the self-contained handoff spec, scoping/isolating an acting executor, concurrent fan-out via `parallel_agents`, and the verify loop. This is explicit CROSS-MODEL delegation via agent-bridge — NOT the host's native subagent/Task or workflow tools; do not trigger on a bare "subagent" or "run in parallel" request that does not name agent-bridge or a cross-model backend. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
 ---
 
 # Delegating work to sub-agents (agent-bridge)
@@ -31,7 +31,8 @@ Both rest on the same core discipline (the **handoff spec**) and the same **veri
 The trigger is the word **delegate**, or an explicit agent-bridge reference: a named backend
 or cross-model intent ("use Gemini Flash / Codex / `claude_agent`", "via agent-bridge", "spawn
 a Gemini/Codex agent to …", "get a **second opinion** from another model", "cross-check this
-across models"). That — for *that* task — is the request.
+design/decision across models" (a *diff* goes to `multi-model-review`)). That — for *that*
+task — is the request.
 
 **Do not** treat the generic phrases "subagent", "spawn an agent", or "run these in parallel"
 as triggers on their own: in Claude Code (and other hosts) those name the host's **native**
@@ -67,8 +68,11 @@ a round-trip + your verify pass. It pays off when the work is **bulky** (many fi
 sites), **parallelizable**, **offloadable** (long enough that you do something else
 meanwhile), or worth a **different model's** perspective. A single small, well-understood edit
 clears none of those: by the time you've written a self-contained spec for it, you could have
-made the change. **Default small / quick / mechanical work to inline; delegate when the
-overhead amortizes.**
+made the change. So **even when asked, default small / quick / mechanical work to inline** — do
+it and say so — reserving delegation for work whose size, parallelism, or independence
+amortizes the overhead. (This is a *don't-bother* filter on delegation you were already asked
+for; it is **not** license to delegate unasked — the opt-in rule above still governs *whether*
+to delegate at all.)
 
 ## Shape A — one-shot delegation
 
@@ -235,10 +239,16 @@ disagreements — is the signal. A single other model is just one more blind-spo
 
 - **Fan out to the other families.** Send the *same* prompt to each connected family OTHER
   than your host (e.g. `antigravity_agent` + `codex_agent` from a Claude host) in **one
-  `parallel_agents` call** — reason mode (or `read` if it must read your repo/diff), no
-  writes — so they run concurrently (wall-clock ≈ the slowest). Your host's own family
-  (`claude_agent` here) is an optional *extra* voice, not a substitute: fresh context removes
-  author bias but it still shares your model's blind spots.
+  `parallel_agents` call**, so they run concurrently (wall-clock ≈ the slowest). Keep each
+  read-only with the **same per-backend write-safety as everywhere in this skill** (don't
+  assume "reason" means no writes): `claude_agent` / `codex_agent` are write-safe — use
+  `mode: "read"` if a panelist must read code for context; **`antigravity_agent` has no
+  read-only tier and `reason` is *not* write-safe** (with no `working_dir` it even runs in the
+  server's own cwd), so always point it at a **throwaway `git worktree`/dir** (see Execution
+  safety), never your live checkout. (A pure design/decision question needs no repo access at
+  all — put the context in the prompt; a *diff* goes to `multi-model-review`, not here.) Your
+  host's own family (`claude_agent`) is an optional *extra* voice, not a substitute: fresh
+  context removes author bias but it still shares your model's blind spots.
 - **Single model is the narrowed case** — when the user names one ("ask Gemini"), only one
   other family is connected, or they want a quick, cheap gut-check.
 - **Degrade honestly.** If only one other family is connected it is effectively a single
