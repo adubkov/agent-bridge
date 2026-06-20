@@ -59,6 +59,14 @@ speed/throughput/cost or its *independent* perspective is the win:
 anything where a wrong *unattended* edit is costly, and **the final verification** of
 whatever the sub-agent produced (always verify — see below).
 
+**Mind the break-even.** Delegation has fixed overhead — a full CLI spawn + model inference +
+a round-trip + your verify pass. It pays off when the work is **bulky** (many files / many
+sites), **parallelizable**, **offloadable** (long enough that you do something else
+meanwhile), or worth a **different model's** perspective. A single small, well-understood edit
+clears none of those: by the time you've written a self-contained spec for it, you could have
+made the change. **Default small / quick / mechanical work to inline; delegate when the
+overhead amortizes.**
+
 ## Shape A — one-shot delegation
 
 Pick a backend (from a Claude host, prefer the *other* families for a genuinely
@@ -82,7 +90,7 @@ is wasted if it has to reverse-engineer the goal. So split the task:
 
 ```
 PLAN      heavy / deep tier — usually the orchestrator ITSELF (it holds the
-          conversation context). Output: a self-contained implementation spec.
+          conversation context). Output: a contract spec — interfaces + acceptance, not code.
    │              (the handoff artifact — see "The handoff spec")
    ▼
 EXECUTE   fast / cheap tier — antigravity_agent tier:"fast" mode:"act"  (Gemini Flash),
@@ -100,10 +108,12 @@ the spec directly. Delegate the plan to a *deep-tier* spawn only when you want a
 pass (e.g. `claude_agent tier:"deep"`, or a different family for an independent design), and
 even then **you** still own the verify step.
 
-**Why this works only with a real spec.** The executor starts cold. The plan is the *entire*
-bridge between your context and its work — so the plan's quality is the ceiling on the
-result. A vague plan to a fast model produces fast garbage. Invest in the spec (next
-section); that is what makes a cheap executor safe.
+**Why this works only with a real spec — at the right altitude.** The executor starts cold.
+The plan is the *entire* bridge between your context and its work, so its quality is the
+ceiling on the result. A vague plan to a fast model produces fast garbage — but the opposite
+failure is just as real: spec it down to the exact bytes and you've done the work yourself, so
+the spawn only adds latency. Invest in the spec at *contract* altitude (next section): tight on
+interfaces/constraints/acceptance, open on the implementation.
 
 ## The handoff spec (the load-bearing part)
 
@@ -121,6 +131,15 @@ Whatever the shape, the `task` you hand a sub-agent must stand entirely on its o
   should run to self-check before returning.
 - **Return shape** — "make the edits and list the files you changed", or for analysis, the
   exact output format you want back.
+
+**Spec the contract, not the content — get the altitude right.** State the goal, the
+interfaces/signatures, the constraints, and the acceptance criteria, then **let the executor
+implement**. Its job is to *implement*, not to *transcribe*. ⚠️ **If you catch yourself writing
+the literal file contents or exact code into the `task`, stop** — you've already done the work,
+and wrapping it in a spawn is slower and pricier than just doing it. Either raise the handoff to
+the contract level (interfaces + acceptance test, implementation left open) so the executor adds
+real value, or make the edit inline. Too vague → fast garbage; too low (the bytes) → pointless
+round-trip. Aim for the middle: **tight on the contract, open on the implementation.**
 
 A plan written for *you* to execute is rarely a sufficient spec for a *fresh* agent — make
 the implicit explicit before handing it off.
@@ -235,15 +254,24 @@ Then review the diff and run the build yourself.
 
 **Shape B — heavy plans (you), Flash implements, you verify:**
 
-1. **Plan** (you, the orchestrator): write the spec — exact files, the change per file,
-   constraints, and the acceptance command. (Or delegate a deep pass to
-   `claude_agent tier:"deep"` if you want a fresh heavy design.)
-2. **Execute** (Flash): hand the spec to `antigravity_agent` with `tier: "fast"`,
+1. **Plan** (you, the orchestrator): write the spec as a **contract** — the files, the
+   *interfaces* (signatures / types / behavior), the constraints, and the **acceptance
+   command** — and stop there. Leave the implementation to Flash; if you've already written the
+   actual code, just `Write` it yourself instead of spawning. (Or delegate a deep design pass
+   to `claude_agent tier:"deep"` for a fresh heavy take.)
+
+   *Contract-style `task` (interfaces + acceptance, not code):* "Add a token-bucket
+   `RateLimiter` to `internal/limit/limiter.go` exposing `New(rps int) *RateLimiter` and
+   `(*RateLimiter) Allow() bool`, and call `Allow()` in `server.handle`
+   (`internal/http/server.go`) to reject over-limit requests with 429. Add a table test in
+   `limiter_test.go` for burst + refill. Match the surrounding style. Run `go test ./internal/...`
+   and report the result." — it pins the interfaces and the test; Flash writes the bucket logic.
+2. **Execute** (Flash): hand that spec to `antigravity_agent` with `tier: "fast"`,
    `mode: "act"`, `working_dir` at the repo — a **clean feature branch**, or a throwaway
    worktree if you want a review-then-merge gate (see Execution safety). If the spec splits
    into independent files, fan the chunks out in one `parallel_agents` call (disjoint files
    or separate worktrees).
-3. **Verify** (you): review the worktree diff, run the build/tests, loop with a corrective
+3. **Verify** (you): review the diff, run the build/tests, loop with a corrective
    follow-up on any failure, then merge.
 
 ## Caveats
