@@ -1020,8 +1020,10 @@ const parallelAgentsDescription = "Run several agent spawns CONCURRENTLY in a si
 	"reuses the same per-backend semantics, the delegation hop-guard, and the reason/read no-delegate freeze as " +
 	"calling the agent directly. Results are returned in job order, each under a `===== job N: <agent> =====` divider " +
 	"with the agent's usual `[agent | mode | model… | elapsed]` header. Validation is all-or-nothing: a malformed or " +
-	"unknown-agent job fails the whole call before any spawn. `max_concurrency` caps simultaneous spawns (default: " +
-	"all jobs at once)."
+	"unknown-agent job fails the whole call before any spawn. A RUNTIME job failure (e.g. a per-job timeout or a " +
+	"CLI error) does NOT fail the call — the bridge still returns every other job's output and reports the " +
+	"failures in the summary header (the count plus the failing job indices), with each failed job's error in its " +
+	"own block. `max_concurrency` caps simultaneous spawns (default: all jobs at once)."
 
 // parallelAgentsTool defines the server-side fan-out tool. Its parallelism lives in
 // the bridge process (goroutines), so it is unaffected by host MCP clients that
@@ -1186,16 +1188,23 @@ func parallelAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		return nil, ctx.Err()
 	}
 
-	errCount := 0
-	for _, f := range failed {
+	// Surface WHICH jobs failed, not just how many: a partial fan-out still returns its
+	// successful jobs' output (that's the point), so the orchestrator needs the failing
+	// indices up front to locate them without scanning every block.
+	var failedJobs []int
+	for i, f := range failed {
 		if f {
-			errCount++
+			failedJobs = append(failedJobs, i)
 		}
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("parallel_agents: %d job(s), max_concurrency=%d, %d reported error(s).\n",
-		len(plans), limit, errCount))
+	sb.WriteString(fmt.Sprintf("parallel_agents: %d job(s), max_concurrency=%d, %d reported error(s)",
+		len(plans), limit, len(failedJobs)))
+	if len(failedJobs) > 0 {
+		sb.WriteString(fmt.Sprintf(" in job(s) %v", failedJobs))
+	}
+	sb.WriteString(".\n")
 	for i := range plans {
 		sb.WriteString(fmt.Sprintf("\n===== job %d: %s =====\n", i, plans[i].agent))
 		sb.WriteString(texts[i])
