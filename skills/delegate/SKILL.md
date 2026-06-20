@@ -158,10 +158,13 @@ The execute phase needs **`mode: "act"`** (writes + commands). Contain it:
 - **A throwaway `git worktree` is OPTIONAL when the changes are intended.** You *want* the
   writes here, so the worktree is **not** a safety requirement — it's a review/containment
   convenience. Pointing `working_dir` at the repo (ideally a **clean feature branch**) and
-  reviewing `git diff` afterward is a perfectly good, simpler flow. Reach for a separate
-  worktree when you (a) have unrelated uncommitted changes you don't want mixed with the
-  agent's, (b) run **multiple** executors in parallel (they'd clobber a shared tree), or
-  (c) want a clean review-then-merge gate / to bound a broad edit's blast radius:
+  reviewing `git diff` afterward is a perfectly good, simpler flow — but check `git status`
+  for untracked debris too, not just `git diff`: an acting agy executor routinely drops
+  scratch `git diff` dumps into `working_dir`, and those are **untracked**, so stage explicit
+  paths (never `git add -A` blind) when you commit. Reach for a separate worktree when you
+  (a) have unrelated uncommitted changes you don't want mixed with the agent's, (b) run
+  **multiple** executors in parallel (they'd clobber a shared tree), or (c) want a clean
+  review-then-merge gate / to bound a broad edit's blast radius:
   ```sh
   wt="$(mktemp -d)/wt"; git worktree add "$wt" -b feat/x HEAD   # point working_dir here
   # … executor runs in $wt … then review its diff and merge, finally:
@@ -256,10 +259,10 @@ Then review the diff and run the build yourself.
   doesn't gate writes, so even a `reason` agy run with a writable `working_dir` (or none —
   which uses the bridge server's cwd, often your tree) can edit files. Point it at a
   throwaway dir/worktree; `--sandbox` does **not** confine writes.
-- **Delegation depth is bounded.** The bridge caps hop depth (`AGENT_HOP_DEPTH` /
-  `AGENT_HOP_MAX`, default 2) and freezes further delegation for non-acting (`reason`/`read`)
-  children. An `act` executor is *not* frozen (it's bounded only by the hop guard), so don't
-  build deep act→act→act chains.
+- **Delegation depth is bounded.** The bridge caps hop depth at `AGENT_HOP_MAX` (default 2),
+  tracking the current depth in `AGENT_HOP_DEPTH` (starts at 0), and freezes further
+  delegation for non-acting (`reason`/`read`) children. An `act` executor is *not* frozen
+  (it's bounded only by the hop guard), so don't build deep act→act→act chains.
 - **Tool descriptions are authoritative.** This skill summarizes per-backend `mode` / `tier`
   / `working_dir` / `sandbox` behavior; if it ever diverges from the bridge's own MCP tool
   descriptions (generated from `cmd/agent-bridge-mcp/main.go`), trust those.
