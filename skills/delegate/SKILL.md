@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Use when the user EXPLICITLY asks to delegate coding work to a different model family via the agent-bridge MCP tools (`antigravity_agent`/Gemini, `claude_agent`, `codex_agent`) — triggers like "delegate this", "have Gemini Flash implement it", "use Codex for X", or "via agent-bridge". Two shapes — (1) hand ONE self-contained task to a fast/cheap cross-model agent while you keep orchestrating (mechanical bulk edits, a first-pass draft, an independent second opinion); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers tier selection (deep/fast), the self-contained handoff spec, scoping/isolating an acting executor, concurrent fan-out via `parallel_agents`, and the verify loop. This is explicit CROSS-MODEL delegation via agent-bridge — NOT the host's native subagent/Task or workflow tools; do not trigger on a bare "subagent" or "run in parallel" request that does not name agent-bridge or a cross-model backend. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
+description: Use when the user EXPLICITLY asks to delegate coding work to a different model family via the agent-bridge MCP tools (`antigravity_agent`/Gemini, `claude_agent`, `codex_agent`) — triggers like "delegate this", "have Gemini Flash implement it", "use Codex for X", "get a second opinion from another model / cross-check across models", or "via agent-bridge". Two shapes — (1) hand ONE self-contained task to a fast/cheap cross-model agent while you keep orchestrating (mechanical bulk edits, a first-pass draft, an independent second opinion — a diverse multi-model panel by default); or (2) a TIERED pipeline where a heavy model plans and a cheaper/faster model (e.g. Gemini Flash) implements, then you verify. Covers tier selection (deep/fast), the self-contained handoff spec, scoping/isolating an acting executor, concurrent fan-out via `parallel_agents`, and the verify loop. This is explicit CROSS-MODEL delegation via agent-bridge — NOT the host's native subagent/Task or workflow tools; do not trigger on a bare "subagent" or "run in parallel" request that does not name agent-bridge or a cross-model backend. Requires the agent-bridge MCP server. (For multi-model code review specifically, use the `multi-model-review` skill instead.)
 ---
 
 # Delegating work to sub-agents (agent-bridge)
@@ -30,7 +30,8 @@ Both rest on the same core discipline (the **handoff spec**) and the same **veri
 **Delegate only when the user has explicitly asked for it — it is opt-in, never automatic.**
 The trigger is the word **delegate**, or an explicit agent-bridge reference: a named backend
 or cross-model intent ("use Gemini Flash / Codex / `claude_agent`", "via agent-bridge", "spawn
-a Gemini/Codex agent to …"). That — for *that* task — is the request.
+a Gemini/Codex agent to …", "get a **second opinion** from another model", "cross-check this
+across models"). That — for *that* task — is the request.
 
 **Do not** treat the generic phrases "subagent", "spawn an agent", or "run these in parallel"
 as triggers on their own: in Claude Code (and other hosts) those name the host's **native**
@@ -53,7 +54,9 @@ speed/throughput/cost or its *independent* perspective is the win:
   sites of X" — run it while you do something else.
 - **Fast first-pass draft** — a doc/test/function you'll then review.
 - **Well-specified implementation** — once *you* have planned it (Shape B).
-- **Independent second opinion** — critique a design or diff; one input, not gospel.
+- **Independent second opinion** — critique a design or decision; a **diverse multi-model
+  panel by default** (see *Second opinion* below), one input, not gospel. (For a *diff*, use
+  `multi-model-review`.)
 
 **Keep doing yourself:** work that needs your accumulated session context, judgment calls,
 anything where a wrong *unattended* edit is costly, and **the final verification** of
@@ -221,6 +224,35 @@ A delegated result is unverified until *you* check it:
   you doing the judgment. Fix inline only for a trivial last-mile touch-up.
 - For a high-stakes diff, escalate to the **`multi-model-review`** skill for a cross-model
   correctness pass before you trust it.
+
+## Second opinion (diverse panel by default)
+
+When the user wants an independent take on a **design, decision, or piece of reasoning** (not a
+diff — for a diff, route to `multi-model-review`), the value is *diversity*: different model
+families have uncorrelated blind spots, so the **spread** of views — and especially the
+disagreements — is the signal. A single other model is just one more blind-spot set, so
+**default to a panel, not one model.**
+
+- **Fan out to the other families.** Send the *same* prompt to each connected family OTHER
+  than your host (e.g. `antigravity_agent` + `codex_agent` from a Claude host) in **one
+  `parallel_agents` call** — reason mode (or `read` if it must read your repo/diff), no
+  writes — so they run concurrently (wall-clock ≈ the slowest). Your host's own family
+  (`claude_agent` here) is an optional *extra* voice, not a substitute: fresh context removes
+  author bias but it still shares your model's blind spots.
+- **Single model is the narrowed case** — when the user names one ("ask Gemini"), only one
+  other family is connected, or they want a quick, cheap gut-check.
+- **Degrade honestly.** If only one other family is connected it is effectively a single
+  opinion — say so in the synthesis; don't imply diversity you didn't get.
+- **Synthesize consensus + divergence.** Lead with where the models agree, then surface
+  outliers and disagreements explicitly, with attribution — don't average them into mush.
+  Every take is one input; you still own the call.
+- **Cost.** A panel is one spawn per model (parallel, so latency ≈ the slowest, but N× the
+  tokens). The single-model path is the cheap escape hatch.
+
+This is **lighter than `multi-model-review`**: N *independent* takes plus your synthesis, with
+**no** adversarial cross-verification wave. Use `multi-model-review` when the subject is a diff
+and you want each finding refuted by a different model; use this panel for diverse judgment on a
+non-diff question.
 
 ## Params reference
 
