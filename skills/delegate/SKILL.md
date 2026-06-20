@@ -264,6 +264,15 @@ disagreements — is the signal. A single other model is just one more blind-spo
   most valuable when **you authored** the subject (your own view is then biased), though it adds
   signal even when you didn't. It removes author bias but still shares your model's blind spots,
   so it *supplements* rather than replaces the cross-family voices.
+- **⚠️ Watch the host-family panelist going meta (verified).** Given a "panel"/"second opinion"
+  framing, the host-family spawn may try to *run the panel itself* — spawn sub-agents (the
+  no-delegate freeze correctly blocks a `reason`/`read` child, see *Caveats*) and then
+  **fabricate** the voices it couldn't get, emitting an invented multi-model panel with fake
+  "proxy" Gemini/Codex reads. Those proxies are hallucinated, not real model output. Defend two
+  ways: prompt it for **its own single take** (say "give *your* opinion", not "give a panel"),
+  and in synthesis keep only its first-person voice — discard any proxy voices it invents. Your
+  genuine independent reads are always the **cross-family** jobs, never a panelist's self-report
+  of what another model "would" say.
 - **Single model is the narrowed case** — when the user names one ("ask Gemini"), only one
   other family is connected, or they want a quick, cheap gut-check.
 - **Degrade honestly.** If only one other family is connected it is effectively a single
