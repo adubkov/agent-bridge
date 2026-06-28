@@ -135,55 +135,57 @@ func TestBuildClaudeArgs(t *testing.T) {
 		in   runOpts
 		want []string
 	}{
+		// claude uses promptStdin, so the TASK is NOT on the command line (runAgent feeds it
+		// on stdin); buildArgs emits `--print` alone and these assert the FLAG construction.
 		{
-			name: "default reason-only: task right after --print, then the --tools \"\" no-tools lock",
+			name: "default reason-only: --print (prompt via stdin), then the --tools \"\" no-tools lock",
 			in:   runOpts{task: "do the thing", timeoutSeconds: 300},
-			want: []string{"--print", "do the thing", "--tools", ""},
+			want: []string{"--print", "--tools", ""},
 		},
 		{
-			name: "allow_tools adds --dangerously-skip-permissions after the task",
+			name: "allow_tools adds --dangerously-skip-permissions",
 			in:   runOpts{task: "edit files", timeoutSeconds: 300, allowTools: true},
-			want: []string{"--print", "edit files", "--dangerously-skip-permissions"},
+			want: []string{"--print", "--dangerously-skip-permissions"},
 		},
 		{
 			name: "model adds --model only when non-empty",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "opus"},
-			want: []string{"--print", "ask", "--model", "opus", "--tools", ""},
+			want: []string{"--print", "--model", "opus", "--tools", ""},
 		},
 		{
 			name: "empty/whitespace model is dropped",
 			in:   runOpts{task: "ask", timeoutSeconds: 300, model: "   "},
-			want: []string{"--print", "ask", "--tools", ""},
+			want: []string{"--print", "--tools", ""},
 		},
 		{
 			name: "add_dirs becomes repeated --add-dir entries",
 			in:   runOpts{task: "ctx", timeoutSeconds: 300, addDirs: []string{"/a", "/b"}},
-			want: []string{"--print", "ctx", "--add-dir", "/a", "--add-dir", "/b", "--tools", ""},
+			want: []string{"--print", "--add-dir", "/a", "--add-dir", "/b", "--tools", ""},
 		},
 		{
 			name: "sandbox is ignored for claude (no --sandbox ever)",
 			in:   runOpts{task: "compute", timeoutSeconds: 300, sandbox: true},
-			want: []string{"--print", "compute", "--tools", ""},
+			want: []string{"--print", "--tools", ""},
 		},
 		{
-			name: "effort adds --effort after the task",
+			name: "effort adds --effort",
 			in:   runOpts{task: "think hard", timeoutSeconds: 300, effort: "xhigh"},
-			want: []string{"--print", "think hard", "--effort", "xhigh", "--tools", ""},
+			want: []string{"--print", "--effort", "xhigh", "--tools", ""},
 		},
 		{
 			name: "read mode appends --permission-mode plan (claude's read-only tier)",
 			in:   runOpts{task: "review", timeoutSeconds: 300, readOnly: true},
-			want: []string{"--print", "review", "--permission-mode", "plan"},
+			want: []string{"--print", "--permission-mode", "plan"},
 		},
 		{
 			name: "model then effort then add-dir ordering, then --tools \"\" last",
 			in:   runOpts{task: "t", timeoutSeconds: 300, model: "opus", effort: "high", addDirs: []string{"/a"}},
-			want: []string{"--print", "t", "--model", "opus", "--effort", "high", "--add-dir", "/a", "--tools", ""},
+			want: []string{"--print", "--model", "opus", "--effort", "high", "--add-dir", "/a", "--tools", ""},
 		},
 		{
 			name: "no --print-timeout even with a timeout set",
 			in:   runOpts{task: "wait", timeoutSeconds: 600},
-			want: []string{"--print", "wait", "--tools", ""},
+			want: []string{"--print", "--tools", ""},
 		},
 		{
 			name: "all options combined, correct ordering, no --sandbox / no --print-timeout",
@@ -196,7 +198,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 				addDirs:        []string{"/x"},
 			},
 			want: []string{
-				"--print", "full task",
+				"--print",
 				"--model", "sonnet",
 				"--add-dir", "/x",
 				"--dangerously-skip-permissions",
@@ -210,6 +212,12 @@ func TestBuildClaudeArgs(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("claudeBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
+			// promptStdin: the task must never appear on the command line.
+			for _, a := range got {
+				if a == tt.in.task {
+					t.Errorf("claudeBackend.buildArgs put the task on the command line (promptStdin): %#v", got)
+				}
+			}
 			// claude must NEVER emit --sandbox or --print-timeout.
 			for _, a := range got {
 				if a == "--sandbox" {
@@ -219,9 +227,10 @@ func TestBuildClaudeArgs(t *testing.T) {
 					t.Errorf("claudeBackend.buildArgs emitted --print-timeout: %#v", got)
 				}
 			}
-			// --print must be first and the task its immediate value.
-			if len(got) < 2 || got[0] != "--print" || got[1] != tt.in.task {
-				t.Errorf("claudeBackend.buildArgs must start with --print <task>; got %#v", got)
+			// --print must be first; its value (the prompt) comes via stdin (promptStdin),
+			// so the very next token is another flag, never the task.
+			if len(got) == 0 || got[0] != "--print" {
+				t.Errorf("claudeBackend.buildArgs must start with --print; got %#v", got)
 			}
 			// Reason tier MUST hard-disable tools via `--tools ""`; read/act must NOT
 			// (read uses --permission-mode plan; act passes the skip-perms flag).
@@ -331,50 +340,52 @@ func TestBuildCodexArgs(t *testing.T) {
 		in   runOpts
 		want []string
 	}{
+		// codex uses promptStdin: no positional prompt and no "--" marker — the task is fed on
+		// stdin (runAgent), so these assert just the exec/flag construction.
 		{
-			name: "reason-only: exec first, read-only sandbox, prompt LAST after --",
+			name: "reason-only: exec first, read-only sandbox (prompt via stdin)",
 			in:   runOpts{task: task, timeoutSeconds: 300},
-			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
-			name: "allow_tools: bypass flag present, no read-only sandbox, prompt LAST after --",
+			name: "allow_tools: bypass flag present, no read-only sandbox",
 			in:   runOpts{task: task, timeoutSeconds: 300, allowTools: true},
-			want: []string{"exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--color", "never", "--", task},
+			want: []string{"exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--color", "never"},
 		},
 		{
-			name: "model and add_dirs land between exec and the trailing prompt",
+			name: "model and add_dirs land after exec",
 			in:   runOpts{task: task, timeoutSeconds: 300, model: "gpt-5", addDirs: []string{"/a", "/b"}},
-			want: []string{"exec", "--model", "gpt-5", "--add-dir", "/a", "--add-dir", "/b", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--model", "gpt-5", "--add-dir", "/a", "--add-dir", "/b", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
 			name: "blank model dropped; sandbox bool ignored (codex has no boolean --sandbox)",
 			in:   runOpts{task: task, timeoutSeconds: 300, model: "  ", sandbox: true},
-			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
-			name: "effort emits -c model_reasoning_effort among flags, before the -- prompt",
+			name: "effort emits -c model_reasoning_effort among flags",
 			in:   runOpts{task: task, timeoutSeconds: 300, effort: "high"},
-			want: []string{"exec", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
 			name: "read mode == reason for codex (both --sandbox read-only)",
 			in:   runOpts{task: task, timeoutSeconds: 300, readOnly: true},
-			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
-			name: "model then effort both land before the trailing prompt",
+			name: "model then effort both land among the flags",
 			in:   runOpts{task: task, timeoutSeconds: 300, model: "gpt-5.5", effort: "high"},
-			want: []string{"exec", "--model", "gpt-5.5", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--model", "gpt-5.5", "-c", "model_reasoning_effort=high", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
 			name: "no --print-timeout even with a custom timeout",
 			in:   runOpts{task: task, timeoutSeconds: 900},
-			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", task},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 		{
-			name: "dash-leading task is shielded by -- (parsed as prompt, not a flag)",
+			name: "dash-leading task goes via stdin, never on the command line (no -- shielding needed)",
 			in:   runOpts{task: "--fix the bug", timeoutSeconds: 300},
-			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--", "--fix the bug"},
+			want: []string{"exec", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only"},
 		},
 	}
 
@@ -384,13 +395,15 @@ func TestBuildCodexArgs(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("codexBackend.buildArgs(%+v) = %#v; want %#v", tt.in, got, tt.want)
 			}
-			// exec subcommand must lead, and the prompt must be the trailing positional
-			// arg — never a --print value (codex has no --print).
+			// exec subcommand must lead; with promptStdin the task is NOT on the command line
+			// (no positional, no "--" marker), and codex never emits --print/--print-timeout.
 			if len(got) == 0 || got[0] != "exec" {
 				t.Errorf("codex must start with the exec subcommand; got %#v", got)
 			}
-			if len(got) == 0 || got[len(got)-1] != tt.in.task {
-				t.Errorf("codex prompt must be the trailing positional arg; got %#v", got)
+			for _, a := range got {
+				if a == tt.in.task || a == "--" {
+					t.Errorf("codex must not put the task (or a -- marker) on the command line (promptStdin); got %#v", got)
+				}
 			}
 			if argsContain(got, "--print") || argsContain(got, "--print-timeout") {
 				t.Errorf("codex must never emit --print/--print-timeout; got %#v", got)
@@ -650,14 +663,19 @@ func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 	t.Setenv(noDelegateEnv, "") // this server is not itself frozen
-	// The fake echoes the flag it actually received in its environment.
-	bin := writeFakeBin(t, "#!/bin/sh\necho \"ND=[$"+noDelegateEnv+"]\"\n")
+	// The fake echoes the AGENT_NO_DELEGATE value it actually received in its environment.
+	bin := fakeBin(t, fakeOpts{EchoND: true})
 
 	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
 			tb := withBin(t, base, bin)
 
 			res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
+			// On a build with no pty (Windows), agy is refused before spawn — assert that
+			// and skip; the freeze plumbing is exercised by the pipe backends below.
+			if ptyRefusedResult(t, base, res, err) {
+				return
+			}
 			if err != nil {
 				t.Fatalf("reason-only: unexpected Go error: %v", err)
 			}
@@ -676,6 +694,29 @@ func TestRunAgentFreezesReasonOnlyChild(t *testing.T) {
 	}
 }
 
+// TestPromptStdin verifies the promptStdin backends (claude, codex) receive the task on
+// STDIN, not the command line (buildArgs omits it). The fake echoes its stdin, so the task
+// must surface in the result — proving runAgent wired cmd.Stdin.
+func TestPromptStdin(t *testing.T) {
+	t.Setenv(hopDepthEnv, "0")
+	t.Setenv(hopMaxEnv, "2")
+	for _, base := range []backend{claudeBackend, codexBackend} {
+		t.Run(base.tool, func(t *testing.T) {
+			if !base.promptStdin {
+				t.Fatalf("%s should be promptStdin", base.tool)
+			}
+			tb := withBin(t, base, fakeBin(t, fakeOpts{EchoStdin: true}))
+			res, err := runAgent(context.Background(), tb, runOpts{task: "STDIN-PROMPT-XYZ", timeoutSeconds: 300})
+			if err != nil {
+				t.Fatalf("[%s] unexpected Go error: %v", base.tool, err)
+			}
+			if txt := resultText(t, res); !strings.Contains(txt, "STDIN[STDIN-PROMPT-XYZ]") {
+				t.Errorf("[%s] task must be fed via stdin; got %q", base.tool, txt)
+			}
+		})
+	}
+}
+
 func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
 	// A failing child whose REAL error is at the END of a long stderr (like codex,
 	// which echoes the whole prompt first, then prints the actual error — e.g. a
@@ -683,8 +724,8 @@ func TestRunAgentFailureSurfacesStderrTail(t *testing.T) {
 	// error stays visible, instead of head-truncating it away.
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
-	// ~6.9 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
-	bin := writeFakeBin(t, "#!/bin/sh\ni=0\nwhile [ $i -lt 300 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxx\\n' 1>&2; i=$((i+1)); done\nprintf 'REAL-ERROR-AT-END\\n' 1>&2\nexit 1\n")
+	// ~7 KB of filler to stderr (over the 4000-byte cap), then the real error, exit 1.
+	bin := fakeBin(t, fakeOpts{FillErrKB: 7, Err: "REAL-ERROR-AT-END", Exit: 1})
 	// Use a pipe-path backend (codex — exactly the case this models): its stderr is
 	// captured separately and tail-truncated. The pty-run antigravity backend instead
 	// merges stderr into one TTY stream — covered by TestRunAgentPTYMergesStderr.
@@ -829,16 +870,6 @@ func TestModeNotes(t *testing.T) {
 // executable via the backend's real binEnv override (see withBin) and drive the
 // real antigravity/claude backends end-to-end — no actual agy/claude CLI is spawned.
 
-// writeFakeBin writes an executable shell script to a temp dir and returns its path.
-func writeFakeBin(t *testing.T, script string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "fake")
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake bin: %v", err)
-	}
-	return p
-}
-
 // withBin points the backend's CLI at the given path using its real binEnv
 // override (the same seam a user would use), leaving cliName intact so result
 // text (e.g. the "(<cli> returned no stdout)" note) still reports the CLI name.
@@ -894,13 +925,13 @@ func TestRunAgentOutcomes(t *testing.T) {
 	t.Setenv(hopMaxEnv, "2")
 
 	tests := []struct {
-		name   string
-		script string
-		check  func(t *testing.T, b backend, res *mcp.CallToolResult, err error)
+		name  string
+		opts  fakeOpts
+		check func(t *testing.T, b backend, res *mcp.CallToolResult, err error)
 	}{
 		{
-			name:   "success passes child stdout through with header",
-			script: "#!/bin/sh\necho CHILD-OUTPUT\n",
+			name: "success passes child stdout through with header",
+			opts: fakeOpts{Out: "CHILD-OUTPUT"},
 			check: func(t *testing.T, b backend, res *mcp.CallToolResult, err error) {
 				if err != nil {
 					t.Fatalf("unexpected Go error: %v", err)
@@ -921,8 +952,8 @@ func TestRunAgentOutcomes(t *testing.T) {
 			},
 		},
 		{
-			name:   "empty stdout yields cli-specific no-output note",
-			script: "#!/bin/sh\nexit 0\n",
+			name: "empty stdout yields cli-specific no-output note",
+			opts: fakeOpts{},
 			check: func(t *testing.T, b backend, res *mcp.CallToolResult, err error) {
 				if err != nil {
 					t.Fatalf("unexpected Go error: %v", err)
@@ -937,8 +968,8 @@ func TestRunAgentOutcomes(t *testing.T) {
 			},
 		},
 		{
-			name:   "non-zero exit becomes an error result carrying stderr",
-			script: "#!/bin/sh\necho boom 1>&2\nexit 3\n",
+			name: "non-zero exit becomes an error result carrying stderr",
+			opts: fakeOpts{Err: "boom", Exit: 3},
 			check: func(t *testing.T, b backend, res *mcp.CallToolResult, err error) {
 				if err != nil {
 					t.Fatalf("unexpected Go error: %v", err)
@@ -957,8 +988,11 @@ func TestRunAgentOutcomes(t *testing.T) {
 	for _, tt := range tests {
 		for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			t.Run(tt.name+"/"+base.tool, func(t *testing.T) {
-				tb := withBin(t, base, writeFakeBin(t, tt.script))
+				tb := withBin(t, base, fakeBin(t, tt.opts))
 				res, err := runAgent(context.Background(), tb, runOpts{task: "do it", timeoutSeconds: 300})
+				if ptyRefusedResult(t, base, res, err) {
+					return
+				}
 				tt.check(t, tb, res, err)
 			})
 		}
@@ -973,13 +1007,18 @@ func TestRunAgentParentCancel(t *testing.T) {
 
 	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
-			// `exec` so the killed process IS the sleep (no orphaned grandchild
-			// holding the stdout pipe open past the cancellation).
-			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
+			// The fake IS the sleeper (no shell wrapper, no orphaned grandchild), so the
+			// kill on cancellation takes out the process holding the stdout pipe.
+			tb := withBin(t, base, fakeBin(t, fakeOpts{SleepMS: 5000}))
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 
 			res, err := runAgent(ctx, tb, runOpts{task: "slow", timeoutSeconds: 300})
+			// On a build with no pty (Windows), agy is refused before spawn — there is no
+			// run to cancel, so assert the refusal and skip the cancellation checks.
+			if ptyRefusedResult(t, base, res, err) {
+				return
+			}
 			if err == nil {
 				t.Fatalf("expected a Go error on parent cancellation, got result %+v", res)
 			}
@@ -999,13 +1038,18 @@ func TestRunAgentTimeoutResult(t *testing.T) {
 
 	for _, base := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 		t.Run(base.tool, func(t *testing.T) {
-			tb := withBin(t, base, writeFakeBin(t, "#!/bin/sh\nexec sleep 5\n"))
+			tb := withBin(t, base, fakeBin(t, fakeOpts{SleepMS: 5000}))
 			// Shrink the per-backend headroom (no global mutation) so the hard
 			// deadline fires quickly. timeoutSeconds 0 => hardDeadline ==
 			// timeoutHeadroom (80ms). Parent ctx has no deadline, so the
 			// child-timeout branch (not parent-cancel) fires.
 			tb.timeoutHeadroom = 80 * time.Millisecond
 			res, err := runAgent(context.Background(), tb, runOpts{task: "slow", timeoutSeconds: 0})
+			// On a build with no pty (Windows), agy is refused before spawn — assert that
+			// and skip; the timeout path is exercised by the pipe backends.
+			if ptyRefusedResult(t, base, res, err) {
+				return
+			}
 			if err != nil {
 				t.Fatalf("expected a tool result, got Go error: %v", err)
 			}
@@ -1030,7 +1074,7 @@ func TestRunAgentKillsGrandchild(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
+	bin := grandchildFakeBin(t, fakeOpts{Grandchild: true})
 	tb := withBin(t, claudeBackend, bin)        // pipe backend: exercises setupProcessGroup + WaitDelay
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 
@@ -1061,23 +1105,12 @@ func TestRunAgentKillsGrandchild(t *testing.T) {
 
 // --- makeHandler request-parsing tests --------------------------------------
 //
-// makeHandler converts an mcp.CallToolRequest into runOpts and delegates to
-// runAgent. These tests drive it with an echo fake (prints its argv) so the
-// parsed/clamped/gated values are observable in the resulting args; plus
-// task-validation and ctx-cancel paths that return before any spawn.
-
-// handlerEchoArgs strips the result header and returns the echoed child argv.
-func handlerEchoArgs(t *testing.T, res *mcp.CallToolResult) []string {
-	t.Helper()
-	parts := strings.SplitN(resultText(t, res), "\n\n", 2)
-	if len(parts) != 2 {
-		t.Fatalf("result has no body after header: %q", resultText(t, res))
-	}
-	if strings.TrimSpace(parts[1]) == "" {
-		return nil
-	}
-	return strings.Split(parts[1], "\n")
-}
+// These assert how a request's params are parsed/clamped/gated into the child argv.
+// Arg construction is pure (buildArgs over buildRunOpts), so the tests observe it
+// directly via the `parse` helper below — no spawn — which keeps them platform-neutral
+// (a needsPTY backend like agy is refused before spawn on a build with no pty, so an
+// echo-fake could never observe its args there). The cwd and ctx-cancel cases below
+// still exercise the real handler.
 
 // argsHave reports whether want appears as a contiguous subsequence of args.
 func argsHave(args []string, want ...string) bool {
@@ -1108,20 +1141,37 @@ func argsContain(args []string, want string) bool {
 func TestMakeHandlerParsing(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
-	echo := writeFakeBin(t, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
-
-	call := func(t *testing.T, b backend, args map[string]any) (*mcp.CallToolResult, error) {
-		h := makeHandler(withBin(t, b, echo))
+	// parse runs the real request→runOpts parsing (buildRunOpts) and, on success, returns
+	// the child argv buildArgs would pass — WITHOUT spawning, so arg construction is
+	// observable for every backend (including agy, which a build with no pty refuses to
+	// spawn). On a validation failure it returns the same error result makeHandler would.
+	parse := func(t *testing.T, b backend, args map[string]any) ([]string, *mcp.CallToolResult) {
+		t.Helper()
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: b.tool, Arguments: args}}
-		return h(context.Background(), req)
+		// Mirror makeHandler's request→jobInput extraction (keep in sync with it).
+		in := jobInput{
+			task:           req.GetString("task", ""),
+			mode:           req.GetString("mode", ""),
+			tier:           req.GetString("tier", ""),
+			model:          req.GetString("model", ""),
+			effort:         req.GetString("effort", ""),
+			workingDir:     req.GetString("working_dir", ""),
+			addDirs:        req.GetStringSlice("add_dirs", nil),
+			timeoutSeconds: req.GetInt("timeout_seconds", 0),
+		}
+		if b.supportsSandbox() {
+			in.sandbox = req.GetBool("sandbox", false)
+		}
+		o, errRes := buildRunOpts(context.Background(), b, in)
+		if errRes != nil {
+			return nil, errRes
+		}
+		return b.buildArgs(o), nil
 	}
 
 	t.Run("empty/whitespace task is rejected before spawning", func(t *testing.T) {
 		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
-			res, err := call(t, b, map[string]any{"task": "   "})
-			if err != nil {
-				t.Fatalf("[%s] unexpected Go error: %v", b.tool, err)
-			}
+			_, res := parse(t, b, map[string]any{"task": "   "})
 			if res == nil || !res.IsError {
 				t.Fatalf("[%s] expected error result, got %+v", b.tool, res)
 			}
@@ -1144,31 +1194,30 @@ func TestMakeHandlerParsing(t *testing.T) {
 			{"in range -> kept", map[string]any{"task": "x", "timeout_seconds": 600}, "600s"},
 		}
 		for _, c := range cases {
-			res, _ := call(t, antigravityBackend, c.args)
-			if a := handlerEchoArgs(t, res); !argsHave(a, "--print-timeout", c.want) {
+			a, _ := parse(t, antigravityBackend, c.args)
+			if !argsHave(a, "--print-timeout", c.want) {
 				t.Errorf("%s: want --print-timeout %s; args=%v", c.name, c.want, a)
 			}
 		}
 	})
 
 	t.Run("sandbox gated to antigravity only", func(t *testing.T) {
-		res, _ := call(t, antigravityBackend, map[string]any{"task": "x", "sandbox": true})
-		if a := handlerEchoArgs(t, res); !argsContain(a, "--sandbox") {
+		a, _ := parse(t, antigravityBackend, map[string]any{"task": "x", "sandbox": true})
+		if !argsContain(a, "--sandbox") {
 			t.Errorf("antigravity should pass --sandbox; args=%v", a)
 		}
 		// claude has no sandboxFlag, so b.supportsSandbox() is false and it's never read.
-		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "sandbox": true})
-		if a := handlerEchoArgs(t, res); argsContain(a, "--sandbox") {
+		a, _ = parse(t, claudeBackend, map[string]any{"task": "x", "sandbox": true})
+		if argsContain(a, "--sandbox") {
 			t.Errorf("claude must never pass --sandbox; args=%v", a)
 		}
 	})
 
 	t.Run("add_dirs trimmed and empties dropped", func(t *testing.T) {
-		res, _ := call(t, antigravityBackend, map[string]any{
+		a, _ := parse(t, antigravityBackend, map[string]any{
 			"task":     "x",
 			"add_dirs": []any{"/a", "  ", "", " /b "},
 		})
-		a := handlerEchoArgs(t, res)
 		if !argsHave(a, "--add-dir", "/a") || !argsHave(a, "--add-dir", "/b") {
 			t.Errorf("want --add-dir /a and /b; args=%v", a)
 		}
@@ -1178,78 +1227,78 @@ func TestMakeHandlerParsing(t *testing.T) {
 	})
 
 	t.Run("model trimmed; blank dropped", func(t *testing.T) {
-		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "model": "  opus  "})
-		if a := handlerEchoArgs(t, res); !argsHave(a, "--model", "opus") {
+		a, _ := parse(t, claudeBackend, map[string]any{"task": "x", "model": "  opus  "})
+		if !argsHave(a, "--model", "opus") {
 			t.Errorf("model should be trimmed to opus; args=%v", a)
 		}
-		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "model": "   "})
-		if a := handlerEchoArgs(t, res); argsContain(a, "--model") {
+		a, _ = parse(t, claudeBackend, map[string]any{"task": "x", "model": "   "})
+		if argsContain(a, "--model") {
 			t.Errorf("blank model must be dropped; args=%v", a)
 		}
 	})
 
 	t.Run("mode param: act / read / reason + rejections", func(t *testing.T) {
 		// act → skip-perms
-		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "mode": "act"})
-		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
+		a, _ := parse(t, claudeBackend, map[string]any{"task": "x", "mode": "act"})
+		if !argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("mode=act should pass the skip flag; args=%v", a)
 		}
 		// read (claude) → --permission-mode plan, no skip-perms
-		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "read"})
-		if a := handlerEchoArgs(t, res); !argsHave(a, "--permission-mode", "plan") || argsContain(a, "--dangerously-skip-permissions") {
+		a, _ = parse(t, claudeBackend, map[string]any{"task": "x", "mode": "read"})
+		if !argsHave(a, "--permission-mode", "plan") || argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("mode=read should pass --permission-mode plan and no skip flag; args=%v", a)
 		}
 		// reason → neither
-		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "reason"})
-		if a := handlerEchoArgs(t, res); argsContain(a, "--dangerously-skip-permissions") || argsContain(a, "plan") {
+		a, _ = parse(t, claudeBackend, map[string]any{"task": "x", "mode": "reason"})
+		if argsContain(a, "--dangerously-skip-permissions") || argsContain(a, "plan") {
 			t.Errorf("mode=reason should be no-tools; args=%v", a)
 		}
 		// case-insensitive
-		res, _ = call(t, claudeBackend, map[string]any{"task": "x", "mode": "ACT"})
-		if a := handlerEchoArgs(t, res); !argsContain(a, "--dangerously-skip-permissions") {
+		a, _ = parse(t, claudeBackend, map[string]any{"task": "x", "mode": "ACT"})
+		if !argsContain(a, "--dangerously-skip-permissions") {
 			t.Errorf("mode should be case-insensitive; args=%v", a)
 		}
 		// read on antigravity → rejected (no read-only tier)
-		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read"})
+		_, res := parse(t, antigravityBackend, map[string]any{"task": "x", "mode": "read"})
 		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
 			t.Errorf("antigravity mode=read should be rejected; got %q", resultText(t, res))
 		}
 		// invalid mode → rejected
-		res, _ = call(t, codexBackend, map[string]any{"task": "x", "mode": "bogus"})
+		_, res = parse(t, codexBackend, map[string]any{"task": "x", "mode": "bogus"})
 		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "invalid mode") {
 			t.Errorf("invalid mode should be rejected; got %q", resultText(t, res))
 		}
 		// mode is validated BEFORE the tier block: agy + read + tier is rejected on the
-		// read-only-mode error and never reaches `agy models` discovery (which, with the
-		// echo fake, would otherwise fail to match and yield a "could not resolve" error).
-		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "mode": "read", "tier": "deep"})
+		// read-only-mode error and never reaches `agy models` discovery (which would
+		// otherwise shell out and, finding no match, yield a "could not resolve" error).
+		_, res = parse(t, antigravityBackend, map[string]any{"task": "x", "mode": "read", "tier": "deep"})
 		if res == nil || !res.IsError || !strings.Contains(resultText(t, res), "no read-only mode") {
 			t.Errorf("agy read+tier should be rejected on mode before tier discovery; got %q", resultText(t, res))
 		}
 	})
 
 	t.Run("effort: claude --effort, codex -c model_reasoning_effort, antigravity ignores", func(t *testing.T) {
-		res, _ := call(t, claudeBackend, map[string]any{"task": "x", "effort": "xhigh"})
-		if a := handlerEchoArgs(t, res); !argsHave(a, "--effort", "xhigh") {
+		a, _ := parse(t, claudeBackend, map[string]any{"task": "x", "effort": "xhigh"})
+		if !argsHave(a, "--effort", "xhigh") {
 			t.Errorf("claude should pass --effort xhigh; args=%v", a)
 		}
-		res, _ = call(t, codexBackend, map[string]any{"task": "x", "effort": "high"})
-		if a := handlerEchoArgs(t, res); !argsHave(a, "-c", "model_reasoning_effort=high") {
+		a, _ = parse(t, codexBackend, map[string]any{"task": "x", "effort": "high"})
+		if !argsHave(a, "-c", "model_reasoning_effort=high") {
 			t.Errorf("codex should pass -c model_reasoning_effort=high; args=%v", a)
 		}
-		res, _ = call(t, antigravityBackend, map[string]any{"task": "x", "effort": "high"})
-		if a := handlerEchoArgs(t, res); argsContain(a, "--effort") || argsContain(a, "model_reasoning_effort=high") {
+		a, _ = parse(t, antigravityBackend, map[string]any{"task": "x", "effort": "high"})
+		if argsContain(a, "--effort") || argsContain(a, "model_reasoning_effort=high") {
 			t.Errorf("antigravity must ignore effort (no lever); args=%v", a)
 		}
 	})
 
 	t.Run("working_dir sets the child cwd", func(t *testing.T) {
 		dir := t.TempDir()
-		// The fake writes a marker into its cwd; if working_dir applied, it lands in dir.
-		marker := writeFakeBin(t, "#!/bin/sh\ntouch cwd-marker\n")
-		h := makeHandler(withBin(t, antigravityBackend, marker))
+		// The fake creates a marker in its cwd; if working_dir applied, it lands in dir.
+		// Uses a pipe backend (claude) so it spawns on every platform (agy needs a pty).
+		h := makeHandler(withBin(t, claudeBackend, fakeBin(t, fakeOpts{Touch: "cwd-marker"})))
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{
-			Name:      antigravityBackend.tool,
+			Name:      claudeBackend.tool,
 			Arguments: map[string]any{"task": "x", "working_dir": dir},
 		}}
 		if _, err := h(context.Background(), req); err != nil {
@@ -1264,7 +1313,7 @@ func TestMakeHandlerParsing(t *testing.T) {
 		for _, b := range []backend{antigravityBackend, claudeBackend, codexBackend} {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			h := makeHandler(withBin(t, b, echo))
+			h := makeHandler(withBin(t, b, os.Args[0])) // never spawned: ctx is already cancelled
 			req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: b.tool, Arguments: map[string]any{"task": "x"}}}
 			res, err := h(ctx, req)
 			if err == nil {
@@ -1279,7 +1328,10 @@ func TestMakeHandlerParsing(t *testing.T) {
 
 // --- resolveBin fallback-chain tests ----------------------------------------
 
-// writeExec writes an empty executable named `name` into dir (creating dir).
+// writeExec writes a placeholder executable named exactly `name` into dir (creating
+// dir) and returns its path. The caller adds any platform extension: on-PATH fixtures
+// need exeSuffix() so exec.LookPath matches them on Windows, while ~/.local/bin
+// fixtures are located by a direct os.Stat on the bare cliName and must NOT be suffixed.
 func writeExec(t *testing.T, dir, name string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1298,9 +1350,9 @@ func TestResolveBinaryFallbacks(t *testing.T) {
 			t.Run("found on PATH via LookPath", func(t *testing.T) {
 				t.Setenv(b.binEnv, "")
 				dir := t.TempDir()
-				want := writeExec(t, dir, b.cliName)
+				want := writeExec(t, dir, b.cliName+exeSuffix()) // .exe so LookPath matches on Windows
 				t.Setenv("PATH", dir)
-				if got := b.resolveBin(); got != want {
+				if got := b.resolveBin(); !samePath(got, want) {
 					t.Errorf("resolveBin() = %q; want PATH hit %q", got, want)
 				}
 			})
@@ -1309,9 +1361,9 @@ func TestResolveBinaryFallbacks(t *testing.T) {
 				t.Setenv(b.binEnv, "")
 				t.Setenv("PATH", t.TempDir()) // a dir without the binary
 				home := t.TempDir()
-				t.Setenv("HOME", home)
+				setHomeDir(t, home)
 				want := writeExec(t, filepath.Join(home, ".local", "bin"), b.cliName)
-				if got := b.resolveBin(); got != want {
+				if got := b.resolveBin(); !samePath(got, want) {
 					t.Errorf("resolveBin() = %q; want ~/.local/bin fallback %q", got, want)
 				}
 			})
@@ -1319,7 +1371,7 @@ func TestResolveBinaryFallbacks(t *testing.T) {
 			t.Run("falls back to bare name", func(t *testing.T) {
 				t.Setenv(b.binEnv, "")
 				t.Setenv("PATH", t.TempDir())
-				t.Setenv("HOME", t.TempDir()) // no .local/bin/<bin>
+				setHomeDir(t, t.TempDir()) // no .local/bin/<bin>
 				if got := b.resolveBin(); got != b.cliName {
 					t.Errorf("resolveBin() = %q; want bare name %q", got, b.cliName)
 				}
@@ -1452,15 +1504,25 @@ func TestBackendRegistry(t *testing.T) {
 			}
 			seen[b.tool] = true
 
-			// buildArgs must carry the task: flag-style starts with promptFlag <task>;
-			// positional ends with <task> (after subcmd and every flag).
+			// buildArgs must carry the task on the command line — UNLESS the backend feeds it
+			// on stdin (promptStdin), where the task must NOT appear in argv at all. Otherwise
+			// flag-style starts with promptFlag <task>; positional ends with <task>.
 			got := b.buildArgs(runOpts{task: "T", timeoutSeconds: 1})
-			if b.promptPositional {
+			switch {
+			case b.promptStdin:
+				for _, a := range got {
+					if a == "T" {
+						t.Errorf("promptStdin backend %q must not put the task in argv; got %#v", b.tool, got)
+					}
+				}
+			case b.promptPositional:
 				if len(got) == 0 || got[len(got)-1] != "T" {
 					t.Errorf("positional-prompt buildArgs must end with <task>; got %#v", got)
 				}
-			} else if len(got) < 2 || got[0] != b.promptFlag || got[1] != "T" {
-				t.Errorf("buildArgs must start with %q <task>; got %#v", b.promptFlag, got)
+			default:
+				if len(got) < 2 || got[0] != b.promptFlag || got[1] != "T" {
+					t.Errorf("buildArgs must start with %q <task>; got %#v", b.promptFlag, got)
+				}
 			}
 
 			// The tool must expose the shared params, and the sandbox param iff supported.
@@ -1541,11 +1603,15 @@ func TestSelectionNote(t *testing.T) {
 }
 
 func TestPickModel(t *testing.T) {
+	// Real `agy models` output (the model NAME is the whole line, effort baked in).
 	const models = `Gemini 3.5 Flash (Medium)
 Gemini 3.5 Flash (High)
+Gemini 3.5 Flash (Low)
 Gemini 3.1 Pro (Low)
 Gemini 3.1 Pro (High)
-Claude Opus 4.6 (Thinking)`
+Claude Sonnet 4.6 (Thinking)
+Claude Opus 4.6 (Thinking)
+GPT-OSS 120B (Medium)`
 	tests := []struct {
 		name  string
 		out   string

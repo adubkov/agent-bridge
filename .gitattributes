@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repo AND on checkout, so editing on Windows
+# (the repo sets core.autocrlf=false) never introduces CRLF — which otherwise shows up
+# as a noisy whole-file diff. Go tooling and gofmt are happy with LF on every OS.
+* text=auto eol=lf

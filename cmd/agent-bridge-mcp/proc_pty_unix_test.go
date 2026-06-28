@@ -24,7 +24,7 @@ func TestRunOnPTYAllocatesTTY(t *testing.T) {
 
 	// runAgent always builds the command with CommandContext (so runOnPTY may set
 	// cmd.Cancel for its group-kill); mirror that here.
-	out, err := runOnPTY(exec.CommandContext(context.Background(), "sh", "-c", script))
+	out, err := runOnPTY(context.Background(), exec.CommandContext(context.Background(), "sh", "-c", script))
 	if err != nil {
 		t.Fatalf("runOnPTY error: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestRunOnPTYAllocatesTTY(t *testing.T) {
 func TestRunAgentPTYMergesStderr(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
-	bin := writeFakeBin(t, "#!/bin/sh\nprintf 'BOOM-on-stderr\\n' 1>&2\nexit 1\n")
+	bin := fakeBin(t, fakeOpts{Err: "BOOM-on-stderr", Exit: 1})
 	tb := withBin(t, antigravityBackend, bin)
 
 	res, err := runAgent(context.Background(), tb, runOpts{task: "x", timeoutSeconds: 300})
@@ -74,7 +74,7 @@ func TestRunAgentKillsGrandchildPTY(t *testing.T) {
 	t.Setenv(hopDepthEnv, "0")
 	t.Setenv(hopMaxEnv, "2")
 
-	bin := writeFakeBin(t, "#!/bin/sh\nsleep 30 &\nsleep 30\n")
+	bin := grandchildFakeBin(t, fakeOpts{Grandchild: true})
 	tb := withBin(t, antigravityBackend, bin)
 	tb.timeoutHeadroom = 150 * time.Millisecond // hardDeadline (timeoutSeconds 0) == 150ms
 

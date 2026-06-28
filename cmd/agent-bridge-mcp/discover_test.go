@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +17,7 @@ import (
 func TestLocateSource(t *testing.T) {
 	b := claudeBackend
 	t.Run("binEnv override that exists -> env/found", func(t *testing.T) {
-		p := writeFakeBin(t, "#!/bin/sh\n")
+		p := fakeBin(t, fakeOpts{}) // never spawned here; just needs to be a real file
 		t.Setenv(b.binEnv, p)
 		path, source, found := b.locate()
 		if !found || source != "env" || path != p {
@@ -56,10 +57,10 @@ func TestLocateSource(t *testing.T) {
 	t.Run("PATH hit -> path/found", func(t *testing.T) {
 		t.Setenv(b.binEnv, "")
 		dir := t.TempDir()
-		want := writeExec(t, dir, b.cliName)
+		want := writeExec(t, dir, b.cliName+exeSuffix()) // .exe so LookPath matches on Windows
 		t.Setenv("PATH", dir)
 		path, source, found := b.locate()
-		if !found || source != "path" || path != want {
+		if !found || source != "path" || !samePath(path, want) {
 			t.Errorf("got (%q,%q,%v); want (%q,path,true)", path, source, found, want)
 		}
 	})
@@ -67,17 +68,17 @@ func TestLocateSource(t *testing.T) {
 		t.Setenv(b.binEnv, "")
 		t.Setenv("PATH", t.TempDir())
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHomeDir(t, home)
 		want := writeExec(t, filepath.Join(home, ".local", "bin"), b.cliName)
 		path, source, found := b.locate()
-		if !found || source != "local-bin" || path != want {
+		if !found || source != "local-bin" || !samePath(path, want) {
 			t.Errorf("got (%q,%q,%v); want (%q,local-bin,true)", path, source, found, want)
 		}
 	})
 	t.Run("not found -> bare name, empty source", func(t *testing.T) {
 		t.Setenv(b.binEnv, "")
 		t.Setenv("PATH", t.TempDir())
-		t.Setenv("HOME", t.TempDir())
+		setHomeDir(t, t.TempDir())
 		path, source, found := b.locate()
 		if found || source != "" || path != b.cliName {
 			t.Errorf("got (%q,%q,%v); want (%q,\"\",false)", path, source, found, b.cliName)
@@ -180,7 +181,7 @@ func TestParseCodexAuth(t *testing.T) {
 func TestListAgentsInstalled(t *testing.T) {
 	// Point every backend's binEnv at an existing fake file so locate is deterministic.
 	for _, b := range backends {
-		t.Setenv(b.binEnv, writeFakeBin(t, "#!/bin/sh\n"))
+		t.Setenv(b.binEnv, fakeBin(t, fakeOpts{}))
 	}
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{"probe": "installed"}}}
 	res, err := listAgentsHandler(context.Background(), req)
@@ -221,7 +222,9 @@ func TestProbeBackendBrokenOverride(t *testing.T) {
 	if st.Path != miss || st.Source != "env" {
 		t.Errorf("got path=%q source=%q; want path=%q source=env", st.Path, st.Source, miss)
 	}
-	if !strings.Contains(st.Detail, miss) || !strings.Contains(st.Detail, "not an executable file") {
+	// The detail renders the path with %q (so on Windows its backslashes are escaped);
+	// match that quoted form rather than the raw path.
+	if !strings.Contains(st.Detail, fmt.Sprintf("%q", miss)) || !strings.Contains(st.Detail, "not an executable file") {
 		t.Errorf("detail=%q; want it to name the override path and the reason", st.Detail)
 	}
 
@@ -229,7 +232,7 @@ func TestProbeBackendBrokenOverride(t *testing.T) {
 	// {installed:false} with empty path/source/detail.
 	t.Setenv(b.binEnv, "")
 	t.Setenv("PATH", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	setHomeDir(t, t.TempDir())
 	if st := probeBackend(context.Background(), b, probeInstalled, 0); st.Installed || st.Path != "" || st.Source != "" || st.Detail != "" {
 		t.Errorf("absent CLI: got installed=%v path=%q source=%q detail=%q; want clean not-found", st.Installed, st.Path, st.Source, st.Detail)
 	}
@@ -252,7 +255,7 @@ func TestListAgentsAuthRefusedWhenFrozen(t *testing.T) {
 	}
 	// installed must still work even when frozen (it never spawns).
 	for _, b := range backends {
-		t.Setenv(b.binEnv, writeFakeBin(t, "#!/bin/sh\n"))
+		t.Setenv(b.binEnv, fakeBin(t, fakeOpts{}))
 	}
 	req2 := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{"probe": "installed"}}}
 	res2, _ := listAgentsHandler(context.Background(), req2)
@@ -267,14 +270,14 @@ func TestCheckServe(t *testing.T) {
 	t.Setenv(noDelegateEnv, "")
 
 	t.Run("PONG reply -> ready", func(t *testing.T) {
-		b := withBin(t, claudeBackend, writeFakeBin(t, "#!/bin/sh\nprintf 'PONG\\n'\n"))
+		b := withBin(t, claudeBackend, fakeBin(t, fakeOpts{Out: "PONG"}))
 		ready, _, detail := b.checkServe(context.Background(), 10*time.Second)
 		if !ready {
 			t.Errorf("want ready; detail=%q", detail)
 		}
 	})
 	t.Run("no PONG -> not ready", func(t *testing.T) {
-		b := withBin(t, claudeBackend, writeFakeBin(t, "#!/bin/sh\nprintf 'nope\\n'\n"))
+		b := withBin(t, claudeBackend, fakeBin(t, fakeOpts{Out: "nope"}))
 		ready, _, detail := b.checkServe(context.Background(), 10*time.Second)
 		if ready || !strings.Contains(detail, "no PONG") {
 			t.Errorf("want not-ready with no-PONG detail; got ready=%v detail=%q", ready, detail)
@@ -287,9 +290,8 @@ func TestCheckAuthStreams(t *testing.T) {
 		// A warning on stderr plus valid auth JSON on stdout. With CombinedOutput the
 		// merged stream would fail json.Unmarshal (and, since exit==0, report "unknown");
 		// capturing stdout separately must parse cleanly to "yes".
-		const json = `{"checks":{"auth":{"credentials":{"category":"auth","status":"ok","summary":"auth is configured"}}}}`
-		b := withBin(t, codexBackend, writeFakeBin(t,
-			"#!/bin/sh\necho 'warning: ignored notice' >&2\nprintf '%s\\n' '"+json+"'\n"))
+		const authJSON = `{"checks":{"auth":{"credentials":{"category":"auth","status":"ok","summary":"auth is configured"}}}}`
+		b := withBin(t, codexBackend, fakeBin(t, fakeOpts{Err: "warning: ignored notice", Out: authJSON}))
 		authed, detail := b.checkAuth(context.Background(), 10*time.Second)
 		if authed != "yes" || !strings.Contains(detail, "configured") {
 			t.Errorf("got (%q,%q); want (yes, ...configured) — stderr must not break the JSON parse", authed, detail)
@@ -298,8 +300,7 @@ func TestCheckAuthStreams(t *testing.T) {
 	t.Run("stderr-only failure still yields a detail", func(t *testing.T) {
 		// Empty stdout, error text on stderr, non-zero exit: the detail falls back to
 		// stderr so a hard failure is not reported with an empty note.
-		b := withBin(t, codexBackend, writeFakeBin(t,
-			"#!/bin/sh\necho 'codex: command not found' >&2\nexit 1\n"))
+		b := withBin(t, codexBackend, fakeBin(t, fakeOpts{Err: "codex: command not found", Exit: 1}))
 		authed, detail := b.checkAuth(context.Background(), 10*time.Second)
 		if authed != "no" || !strings.Contains(detail, "not found") {
 			t.Errorf("got (%q,%q); want (no, ...not found) from the stderr fallback", authed, detail)

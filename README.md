@@ -204,10 +204,23 @@ delegate, bounded by the hop guard above.
 ## Build
 
 ```sh
+make build                                                   # recommended (handles the .exe suffix)
+# or, by hand:
 go build -o agent-bridge-mcp ./cmd/agent-bridge-mcp          # local binary
 # or
 go install github.com/adubkov/agent-bridge/cmd/agent-bridge-mcp@latest
 ```
+
+> **Windows:** the binary must be named `agent-bridge-mcp.exe` — MCP hosts launch it via
+> Node/`CreateProcess`, which won't run an extensionless executable (it fails with `ENOENT`,
+> showing up as a server that connects but exposes no tools). `make build` does this for you
+> (`go env GOEXE`); a hand-rolled `go build -o agent-bridge-mcp` produces a binary that Git
+> Bash can run but the host cannot. The plugin manifests stay extensionless and resolve to the
+> `.exe` automatically.
+>
+> All three backends run on Windows. `antigravity_agent` (agy) needs a controlling terminal,
+> which the server provides via a Windows pseudo-console (ConPTY) — the same role a unix pty
+> plays on macOS/Linux — so agy and its `tier` model discovery work on Windows too.
 
 Each tool requires its CLI:
 
