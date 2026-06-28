@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os/exec"
 	"syscall"
@@ -26,8 +27,10 @@ const ptySupported = true
 // context timeout — matching the pipe path's setupProcessGroup so grandchildren die
 // too. We must NOT also set Setpgid: setpgid() on a session leader fails with EPERM,
 // which would break the child's launch. cmd.WaitDelay (set by the caller) bounds how
-// long Wait can block afterward.
-func runOnPTY(cmd *exec.Cmd) ([]byte, error) {
+// long Wait can block afterward. ctx is unused here — the deadline is already wired into
+// cmd via the caller's CommandContext (cmd.Cancel) — but is part of the cross-platform
+// signature (the Windows ConPTY path, which does not use exec.Cmd, needs it explicitly).
+func runOnPTY(_ context.Context, cmd *exec.Cmd) ([]byte, error) {
 	// pty.Start preserves any existing SysProcAttr and adds Setsid/Setctty/Ctty. Reset
 	// it so a Setpgid left over from a caller can't collide with Setsid (EPERM).
 	cmd.SysProcAttr = &syscall.SysProcAttr{}

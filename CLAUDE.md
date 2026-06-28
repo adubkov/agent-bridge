@@ -18,7 +18,8 @@ individual tool calls **serially**. It shares per-job validation with `makeHandl
 hop-guard + no-delegate freeze. The server also exposes a
 **`tier`** param (`deep`/`fast`) that resolves model+effort per backend as registry data
 (`tiers`/`tierSpec`) — for agy the model is discovered from `agy models` at runtime
-(`discoverModel`, process-cached), claude/codex carry explicit presets. The pure
+(`discoverModel`, process-cached, run **under the pty** since agy lists nothing on a pipe),
+claude/codex carry explicit presets. The pure
 `resolveTier`/`pickModel` keep `buildArgs` subprocess-free; auth uses per-CLI parsers
 (`parseClaudeAuth`/`parseCodexAuth`, since exit codes alone are unreliable).
 
@@ -56,18 +57,40 @@ agent. Re-run an `install-*` target to push a new build.
 
 ## Backend gotchas (load-bearing — verified the hard way)
 
-**`agy` (antigravity) must run under a pseudo-terminal.** agy's agentic `--print` loop only
-runs to completion with a controlling TTY; spawned with plain pipes it **hangs** until the
-hard kill, burning the whole timeout. The bridge therefore runs the agy backend under a pty
-(`needsPTY` + `runOnPTY` in [proc_pty_unix.go](cmd/agent-bridge-mcp/proc_pty_unix.go)).
-`claude`/`codex` are built for headless `--print`/`exec` and use plain pipes — do **not** add
-a pty for them. On a build without pty support (non-unix), the dispatch **refuses** a
-`needsPTY` backend up front instead of falling through to pipes and hanging — keep that
-guard. When touching `runOnPTY`: keep the goroutine drain + grace-period
-force-close of the master (a synchronous `io.Copy` before `Wait` deadlocks if a grandchild
-escapes the process-group kill and holds the slave open), and keep `cleanPTYOutput` (strip
-ANSI/CR so results stay parseable). Under a pty stdout+stderr **merge**, so error/timeout
+**`agy` (antigravity) must run under a pseudo-terminal — on every OS.** agy's agentic
+`--print` loop only runs to completion with a controlling TTY (and `agy models` prints
+**nothing** without one); spawned with plain pipes it **hangs** until the hard kill, burning
+the whole timeout. The bridge runs the agy backend under a pty via `needsPTY` + `runOnPTY`,
+which is platform-split: a unix pty ([proc_pty_unix.go](cmd/agent-bridge-mcp/proc_pty_unix.go),
+`creack/pty`) and a **Windows ConPTY** ([proc_pty_windows.go](cmd/agent-bridge-mcp/proc_pty_windows.go),
+`UserExistsError/conpty`). `claude`/`codex` are built for headless `--print`/`exec` and use
+plain pipes — do **not** add a pty for them. Only a platform with NEITHER (the
+[proc_pty_other.go](cmd/agent-bridge-mcp/proc_pty_other.go) `!unix && !windows` fallback,
+`ptySupported=false`) **refuses** a `needsPTY` backend up front instead of hanging — keep that
+guard. When touching the unix `runOnPTY`: keep the goroutine drain + grace-period force-close
+of the master (a synchronous `io.Copy` before `Wait` deadlocks if a grandchild escapes the
+process-group kill and holds the slave open). For the Windows path: ConPTY is driven by a
+command LINE (not `exec.Cmd`), so `runOnPTY` takes the **ctx** explicitly (the deadline isn't
+wired via `cmd.Cancel`); `conpty.Close` both kills the attached process (and console-sharing
+grandchildren) and unblocks the drain; ConPTY never EOFs the reader until Close, so a clean
+exit uses a short `ptyExitDrain` settle, not `childWaitDelay`. Keep `cleanPTYOutput`: it
+strips ANSI/OSC, drops CR, AND collapses full-screen repaints by keeping only what follows the
+last clear/home (`screenResetRE`) — agy animates a cursor-home spinner, which would otherwise
+glue onto the first real line and corrupt model matching. `discoverModel` runs `agy models`
+under the same pty for the same reason. Under a pty stdout+stderr **merge**, so error/timeout
 paths tail-truncate the merged stream for pty backends (`backend.failureStdout`).
+
+**claude/codex take the prompt on STDIN; agy takes it on the command line.** claude/codex
+set `promptStdin` — `buildArgs` omits the task and `runAgent` wires `cmd.Stdin` (`claude
+--print` / `codex exec` read the prompt from stdin when no prompt arg is given). This dodges
+two Windows traps a prompt hits via argv: CreateProcess caps the command line near 32 KB, and
+a `.cmd`/`.bat` shim (codex installs as `codex.cmd`) runs through cmd.exe, which mangles
+prompt metacharacters like `|`. agy can't use stdin (under its pty, stdin IS the terminal),
+so it stays on argv — and `runOnPTY` (Windows) bounds the **actual EscapeArg-expanded command
+line** (`maxWindowsCmdline`, measured in UTF-16 units, not raw task bytes) so a too-large agy
+task fails with a clear message, not a cryptic `CreateProcess` error. Don't put the task back
+on agy-style argv for a `promptStdin` backend, and keep `buildArgs` omitting the prompt token
+when `promptStdin` is set.
 
 **`agy --sandbox` is NOT a write guard.** It enables agy's *terminal* restrictions only; a
 file write under `sandbox: true` still lands in `working_dir` (verified). agy also has **no
@@ -86,9 +109,31 @@ patterns, but stage explicit paths so debris can't slip into a commit.
 ## Repo conventions
 
 - The built binary `agent-bridge-mcp` lives at the **repo root** and is gitignored as
-  `/agent-bridge-mcp` — **anchored** with a leading slash on purpose, so the pattern does not
-  also match the `cmd/agent-bridge-mcp/` source dir and silently ignore new `.go` files
-  there.
-- `cmd/agent-bridge-mcp/proc_*.go` are platform-split via build tags (`unix` vs `!unix`);
-  add new OS-specific helpers the same way and keep a non-unix fallback so the package builds
-  everywhere.
+  `/agent-bridge-mcp` (plus the Windows `/agent-bridge-mcp.exe`) — **anchored** with a leading
+  slash on purpose, so the pattern does not also match the `cmd/agent-bridge-mcp/` source dir
+  and silently ignore new `.go` files there.
+- **Windows needs the `.exe` suffix.** MCP hosts spawn the server via Node/`CreateProcess`,
+  which (unlike Git Bash, which sniffs the PE header) refuses to exec an extensionless binary
+  and dies with `ENOENT` — the server then shows as connected-but-toolless / failed. So the
+  [Makefile](Makefile) splits `NAME` (base name: source dir + the **extensionless** command
+  token in the committed `.mcp.json`) from `BINARY := $(NAME)$(shell go env GOEXE)` (the built
+  file, `.exe` on Windows). The manifests stay extensionless on purpose — Unix matches the file
+  directly, Windows resolves the token to the `.exe` — so only the built file's name varies by
+  OS. Don't hardcode `.exe` into a manifest, and don't fold `BINARY` back into `CMD`/`NAME`.
+- `cmd/agent-bridge-mcp/proc_*.go` are platform-split via build tags — **three ways** for the
+  pty path: `unix` (`proc_pty_unix.go`), `windows` (`proc_pty_windows.go`, ConPTY), and the
+  `!unix && !windows` fallback (`proc_pty_other.go`, `ptySupported=false`). The non-pty
+  `proc_*.go` (process-group helpers) stay a `unix` / `!unix` split. Add new OS-specific
+  helpers the same way and keep a fallback so the package builds everywhere (verified by
+  cross-compiling tests for linux/darwin and `go build` for plan9).
+- **Tests must run on Windows too** (`go test ./...` is green there). The spawn tests therefore
+  use a CROSS-PLATFORM fake CLI, not `#!/bin/sh` scripts (Windows can't exec those): a `TestMain`
+  in [fakecli_test.go](cmd/agent-bridge-mcp/fakecli_test.go) re-execs the test binary as the fake
+  when `AGENT_BRIDGE_FAKECLI` is set — drive it via `fakeBin(t, fakeOpts{…})`, never a shell
+  script. Other Windows gotchas baked into the tests: `exec.LookPath` only matches PATHEXT names
+  (suffix on-PATH fixtures with `exeSuffix()`); `os.UserHomeDir()` reads `%USERPROFILE%` not
+  `$HOME` (use `setHomeDir`); paths compare case-insensitively (`samePath`). agy is `needsPTY`,
+  so on Windows its spawn-behavior tests run the fake CLI **through ConPTY** (cleaned by
+  `cleanPTYOutput`); `ptyRefusedResult` only fires on the rare build with no pty at all
+  (`!unix && !windows`). Arg-construction is checked purely (no spawn) over `buildArgs`, so it
+  covers agy on every OS regardless of the pty.

@@ -259,6 +259,16 @@ type backend struct {
 	// codex whose non-interactive form is `<bin> exec [flags] <prompt>`.
 	promptPositional bool
 
+	// promptStdin feeds the task on the child's STDIN instead of putting it on the
+	// command line (the CLI reads its prompt from stdin when no prompt arg is given —
+	// verified for `claude --print` and `codex exec`). This sidesteps two Windows traps a
+	// long/odd prompt hits via argv: the command line is capped at ~32 KB (CreateProcess),
+	// and a CLI launched as a .cmd/.bat shim (codex.cmd) runs through cmd.exe, which
+	// interprets prompt metacharacters like `|`. buildArgs then omits the prompt token and
+	// runAgent wires cmd.Stdin. NOT for needsPTY backends (agy): under a pty stdin IS the
+	// terminal, and agy takes its prompt as a --print arg.
+	promptStdin bool
+
 	// extraArgs are static flags always appended to the invocation (e.g. codex's
 	// ["--skip-git-repo-check", "--color", "never"]). nil for CLIs that need none.
 	extraArgs []string
@@ -447,8 +457,26 @@ func (b backend) discoverModel(ctx context.Context, match []string) string {
 	defer cancel()
 	cmd := exec.CommandContext(cctx, b.resolveBin(), b.modelListCmd...)
 	cmd.WaitDelay = childWaitDelay
-	setupProcessGroup(cmd)
-	out, err := cmd.Output()
+
+	// A needsPTY backend (agy) gates ALL its output on a controlling terminal — `agy
+	// models` prints nothing through plain pipes — so list models under the pty too,
+	// then de-TTY the result before matching. Pty-less backends use plain pipes.
+	var out []byte
+	var err error
+	switch {
+	case b.needsPTY && !ptySupported:
+		// No pty on this build, so a pty-only CLI can't list models (and runAgent refuses
+		// to spawn it anyway). Don't fall through to plain pipes, where it would hang/return
+		// nothing — report "unresolved" immediately.
+		return ""
+	case b.needsPTY:
+		var raw []byte
+		raw, err = runOnPTY(cctx, cmd)
+		out = []byte(cleanPTYOutput(raw))
+	default:
+		setupProcessGroup(cmd)
+		out, err = cmd.Output()
+	}
 	model := ""
 	if err == nil {
 		model = pickModel(string(out), match)
@@ -512,13 +540,19 @@ func (b backend) resolveBin() string {
 // with every other flag AFTER it — putting another flag between promptFlag and the
 // task makes the CLI treat that flag as the prompt. Positional CLIs
 // (promptPositional) instead carry the task as a TRAILING argument emitted last,
-// after subcmd and every flag (e.g. `codex exec [flags] <prompt>`). An empty flag
-// name means the CLI lacks that option, so it (and its value/loop) is skipped.
-// Pure — table-testable.
+// after subcmd and every flag (e.g. `codex exec [flags] <prompt>`). When promptStdin is
+// set the task is NOT on the command line at all (runAgent feeds it on stdin), so the
+// prompt token is omitted here — for flag-style the mode flag is still emitted (e.g.
+// `claude --print` with no value reads stdin). An empty flag name means the CLI lacks
+// that option, so it (and its value/loop) is skipped. Pure — table-testable.
 func (b backend) buildArgs(o runOpts) []string {
 	args := append([]string{}, b.subcmd...)
 	if !b.promptPositional {
-		args = append(args, b.promptFlag, o.task)
+		if b.promptStdin {
+			args = append(args, b.promptFlag) // value comes via stdin
+		} else {
+			args = append(args, b.promptFlag, o.task)
+		}
 	}
 	if b.timeoutFlag != "" {
 		args = append(args, b.timeoutFlag, fmt.Sprintf("%ds", o.timeoutSeconds))
@@ -566,8 +600,9 @@ func (b backend) buildArgs(o runOpts) []string {
 	// end-of-options marker. Without it a task that starts with a dash (e.g.
 	// "--fix the bug") or matches a subcommand name (codex exec's resume/review/help)
 	// is parsed as a flag/subcommand instead of the prompt — codex itself rejects it
-	// with "unexpected argument ... use '-- ...'".
-	if b.promptPositional {
+	// with "unexpected argument ... use '-- ...'". With promptStdin there is no positional
+	// (the prompt is on stdin), so neither the marker nor the task is emitted.
+	if b.promptPositional && !b.promptStdin {
 		args = append(args, "--", o.task)
 	}
 	return args
@@ -653,6 +688,7 @@ var backends = []backend{
 		cliName:       "claude",
 		binEnv:        "CLAUDE_BIN",
 		promptFlag:    "--print",
+		promptStdin:   true, // `claude --print` reads the prompt from stdin (off the command line)
 		modelFlag:     "--model",
 		effortFlag:    "--effort",
 		addDirFlag:    "--add-dir",
@@ -681,6 +717,7 @@ var backends = []backend{
 		binEnv:           "CODEX_BIN",
 		subcmd:           []string{"exec"},
 		promptPositional: true,
+		promptStdin:      true, // `codex exec` (no positional) reads the prompt from stdin
 		modelFlag:        "--model",
 		effortConfigKey:  "model_reasoning_effort",
 		addDirFlag:       "--add-dir",
@@ -880,6 +917,17 @@ func buildRunOpts(ctx context.Context, b backend, in jobInput) (runOpts, *mcp.Ca
 	if task == "" {
 		return runOpts{}, mcp.NewToolResultError("`task` is required and must be a non-empty string")
 	}
+	// A pty-only backend (agy) can't run on a build without pty support; refuse here, up front,
+	// with the same reason runAgent gives — otherwise a tier request fails later as a misleading
+	// "could not resolve a model" (tier discovery also needs the pty) instead of "needs a pty".
+	// No-op on unix/windows (ptySupported).
+	if b.needsPTY && !ptySupported {
+		return runOpts{}, mcp.NewToolResultError(fmt.Sprintf(
+			"%s requires a pseudo-terminal, which this build does not support (GOOS=%s).", b.tool, runtime.GOOS))
+	}
+	// (Windows command-line length is bounded at SPAWN time for the one argv-prompt backend,
+	// agy — see runOnPTY; it measures the actual EscapeArg-expanded line, which a raw task-byte
+	// check here could not. claude/codex feed the prompt on stdin, so they have no such cap.)
 
 	timeoutSeconds := defaultTimeoutSeconds
 	if in.timeoutSeconds > 0 {
@@ -1275,6 +1323,9 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	if strings.TrimSpace(o.workingDir) != "" {
 		cmd.Dir = o.workingDir
 	}
+	if b.promptStdin {
+		cmd.Stdin = strings.NewReader(o.task) // prompt off the command line (buildArgs omitted it)
+	}
 	// Spawn the child with an incremented delegation depth (no duplicate keys), and
 	// — when this run is NON-ACTING (reason or read mode) — with AGENT_NO_DELEGATE=1
 	// so the child cannot re-enter the bridge to spawn a grandchild.
@@ -1305,7 +1356,7 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 		// Setsid, so we must NOT also Setpgid — setpgid on a session leader is EPERM)
 		// and returns combined stdout+stderr, which we de-TTY (strip ANSI/CR) into stdout.
 		var out []byte
-		out, runErr = runOnPTY(cmd)
+		out, runErr = runOnPTY(runCtx, cmd)
 		stdout.WriteString(cleanPTYOutput(out))
 	} else {
 		setupProcessGroup(cmd)
@@ -1357,10 +1408,45 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 // the pipe-run backends already return.
 var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[@-_]")
 
-// cleanPTYOutput turns raw pseudo-terminal output into plain text: it strips ANSI
-// escape sequences and normalizes the TTY's CRLF / bare-CR line endings to LF.
+// screenResetRE matches the sequences a full-screen TUI uses to repaint from the top:
+// clear-screen (ESC[2J) and cursor-home — ESC[H plus the row/col-1 forms ESC[1H, ESC[0H,
+// ESC[;H, ESC[1;1H, ESC[;1H, etc. (a row param of nothing/0/1 with an optional col of
+// nothing/0/1). It deliberately does NOT match other absolute positions like ESC[5H. agy
+// under a pty/ConPTY animates a "Fetching…" spinner by repainting at HOME, then writes its
+// real output after a final home/clear. cleanPTYOutput keeps only what follows the LAST
+// such reset so those transient frames don't survive (with cursor-home stripped as a bare
+// CSI they would otherwise concatenate onto the first real line and corrupt it).
+var screenResetRE = regexp.MustCompile("\x1b\\[(?:2J|[01]?(?:;[01]?)?H)")
+
+// cleanPTYOutput turns raw pseudo-terminal output into plain text: it discards the
+// pre-repaint scrollback (everything up to the last clear/home), strips ANSI escape
+// sequences, and normalizes the TTY's CRLF / bare-CR line endings to LF.
 func cleanPTYOutput(b []byte) string {
-	s := ansiEscapeRE.ReplaceAllString(string(b), "")
+	s := string(b)
+	// Keep the last NON-EMPTY painted screen: walk the clear/home positions from the end and
+	// return the first whose following text isn't blank. This drops the transient spinner
+	// frames AND a trailing reset that leaves nothing after it, without falling back to the
+	// whole spinner-laden stream (which would glue stale frames back onto the real output).
+	//
+	// This is a pragmatic heuristic, not a full terminal emulator — it assumes the real output
+	// is the LAST painted screen, which holds for agy (it clears once, then prints the answer/
+	// model list). Two narrow edges it does NOT handle, neither seen in agy's actual output:
+	// a blank final screen surfaces the prior frame (e.g. a spinner) instead of "" — harmless,
+	// pickModel won't match it; and a real answer that itself contains a raw clear/home byte
+	// loses the text before it. Full fidelity would need a vt-emulator (and a fixed screen size
+	// that drops scrollback); not worth it for the verified agy behavior.
+	locs := screenResetRE.FindAllStringIndex(s, -1)
+	for i := len(locs) - 1; i >= 0; i-- {
+		if tail := deTTY(s[locs[i][1]:]); strings.TrimSpace(tail) != "" {
+			return tail
+		}
+	}
+	return deTTY(s)
+}
+
+// deTTY strips ANSI escape sequences and normalizes CRLF / bare-CR line endings to LF.
+func deTTY(s string) string {
+	s = ansiEscapeRE.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "")
 	return s

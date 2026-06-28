@@ -1,6 +1,14 @@
-BINARY := agent-bridge-mcp
+# NAME is the base binary name: it doubles as the source package dir (cmd/agent-bridge-mcp)
+# and the EXTENSIONLESS command token in the committed plugin manifests (.mcp.json). BINARY
+# is the actual built FILE — `go env GOEXE` appends `.exe` on Windows, where MCP hosts spawn
+# the server via Node/CreateProcess, which (unlike Git Bash) refuses to exec an extensionless
+# PE and fails with ENOENT. The manifests stay extensionless on purpose: on Unix the token
+# matches the file directly; on Windows the host resolves the extensionless token to the .exe.
+# So only the built file's name varies by OS — the manifests never change.
+NAME   := agent-bridge-mcp
 # CMD is the MCP server's main package (module: github.com/adubkov/agent-bridge).
-CMD    := ./cmd/$(BINARY)
+CMD    := ./cmd/$(NAME)
+BINARY := $(NAME)$(shell go env GOEXE)
 
 MARKETPLACE := agent-bridge-local
 PLUGIN      := agent-bridge
@@ -125,7 +133,7 @@ install-agy: build
 	@cfg="$(AGY_PLUGIN_DIR)/mcp_config.json"; \
 	if [ -f "$$cfg" ]; then \
 	  repl=$$(printf '%s' "$(AGY_PLUGIN_DIR)/$(BINARY)" | sed 's/[&\\#]/\\&/g'); \
-	  sed 's#$${CLAUDE_PLUGIN_ROOT}/$(BINARY)#'"$$repl"'#' "$$cfg" > "$$cfg.tmp" && mv "$$cfg.tmp" "$$cfg" && \
+	  sed 's#$${CLAUDE_PLUGIN_ROOT}/$(NAME)#'"$$repl"'#' "$$cfg" > "$$cfg.tmp" && mv "$$cfg.tmp" "$$cfg" && \
 	  echo "repointed agy MCP command -> $(AGY_PLUGIN_DIR)/$(BINARY)"; \
 	else \
 	  echo "WARNING: $$cfg not found; set the MCP command to $(AGY_PLUGIN_DIR)/$(BINARY) manually."; \
