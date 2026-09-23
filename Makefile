@@ -19,7 +19,7 @@ PLUGIN      := agent-bridge
 # mcp_config.json at it. Override AGY_PLUGIN_DIR if your agy layout differs.
 AGY_PLUGIN_DIR := $(HOME)/.gemini/config/plugins/$(PLUGIN)
 
-.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex smoke-list-agents smoke-parallel install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
+.PHONY: build install vet test clean smoke smoke-antigravity smoke-claude smoke-codex smoke-list-agents smoke-parallel smoke-progress install-claude uninstall-claude install-agy uninstall-agy install-codex uninstall-codex install-all uninstall-all help
 
 ## build: compile the MCP server (cmd/agent-bridge-mcp) into the REPO ROOT
 ##        (./agent-bridge-mcp). The install-* targets copy this freshly built binary
@@ -45,8 +45,8 @@ test:
 ## smoke: build + smoke-test ALL tools (antigravity_agent + claude_agent + codex_agent).
 ##        Needs agy, claude AND codex authed; runs each in a clean temp dir. For one
 ##        tool, use the smoke-antigravity / smoke-claude / smoke-codex targets.
-smoke: smoke-antigravity smoke-claude smoke-codex smoke-list-agents
-	@echo "smoke OK (antigravity + claude + codex + list_agents)"
+smoke: smoke-antigravity smoke-claude smoke-codex smoke-list-agents smoke-progress
+	@echo "smoke OK (antigravity + claude + codex + list_agents + progress)"
 
 # Map each smoke-<label> target to the MCP tool it exercises.
 TOOL_antigravity := antigravity_agent
@@ -89,6 +89,24 @@ smoke-parallel: build
 	  && printf '%s' "$$out" | grep -q "0 reported error(s)" \
 	  && printf '%s' "$$out" | grep -q PONG \
 	  && echo "smoke-parallel OK" || (echo "smoke-parallel FAILED"; exit 1)
+
+## smoke-progress: verify the server emits notifications/progress while a child runs
+##                (needs NO authed CLI — the fake claude is a sleep+echo script)
+smoke-progress: build
+	@mkdir -p /tmp/agent-bridge-mcp-smoke-progress
+	@printf '#!/bin/sh\nsleep 2\necho PONG\n' > /tmp/agent-bridge-mcp-smoke-progress/fake-claude
+	@chmod +x /tmp/agent-bridge-mcp-smoke-progress/fake-claude
+	@out="$$(printf '%s\n' \
+	'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+	'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+	'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"claude_agent","_meta":{"progressToken":"pt-smoke"},"arguments":{"task":"Reply with exactly the word: PONG","timeout_seconds":120}}}' \
+	| CLAUDE_BIN=/tmp/agent-bridge-mcp-smoke-progress/fake-claude AGENT_BRIDGE_PROGRESS_INTERVAL_MS=300 ./$(BINARY))"; \
+	n=$$(printf '%s' "$$out" | grep -c '"method":"notifications/progress"'); \
+	printf '%s' "$$out" | grep -q '"progressToken":"pt-smoke"' \
+	  && [ "$$n" -ge 3 ] \
+	  && printf '%s' "$$out" | grep -q PONG \
+	  && echo "smoke-progress OK ($$n progress updates during a 2s run)" \
+	  || (echo "smoke-progress FAILED (saw $$n progress updates)"; exit 1)
 
 ## install-claude: register this repo as a local marketplace and install the plugin into
 ##                 Claude Code (loads the skills AND the agent-bridge MCP server).
