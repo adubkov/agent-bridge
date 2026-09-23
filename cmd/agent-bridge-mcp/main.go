@@ -81,6 +81,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -134,6 +135,12 @@ type runOpts struct {
 	tier       string // resolved reviewer tier (deep/fast) for the result header; "" if none requested
 	addDirs    []string
 	workingDir string
+	// progressToken is the caller's _meta.progressToken (present only when the
+	// client asked for notifications/progress updates). nil = no reporting.
+	progressToken mcp.ProgressToken
+	// progressCounter lets the concurrent jobs of ONE request share a
+	// monotonically increasing progress stream. nil = a private per-run counter.
+	progressCounter *atomic.Int64
 }
 
 // Access modes — the values of the `mode` param. reason = reason/answer only, no
@@ -1048,6 +1055,9 @@ func makeHandler(b backend) server.ToolHandlerFunc {
 		if errRes != nil {
 			return errRes, nil
 		}
+		if req.Params.Meta != nil {
+			o.progressToken = req.Params.Meta.ProgressToken
+		}
 		return runAgent(ctx, b, o)
 	}
 }
@@ -1172,6 +1182,10 @@ func parallelAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		agent string
 	}
 	plans := make([]plan, len(rawJobs))
+	// ONE progress stream for the whole request: every job shares the counter, so
+	// notifications/progress keeps the host's idle timer alive even while
+	// individual jobs are still running.
+	var parallelProgressCounter atomic.Int64
 	for i, rj := range rawJobs {
 		m, ok := rj.(map[string]any)
 		if !ok {
@@ -1200,6 +1214,10 @@ func parallelAgentsHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		if errRes != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("jobs[%d] (%s): %s", i, agent, toolResultText(errRes))), nil
 		}
+		if req.Params.Meta != nil {
+			o.progressToken = req.Params.Meta.ProgressToken
+		}
+		o.progressCounter = &parallelProgressCounter
 		plans[i] = plan{b: b, o: o, agent: agent}
 	}
 
@@ -1289,6 +1307,84 @@ func delegationGuard(tool string) *mcp.CallToolResult {
 	return nil
 }
 
+// defaultProgressIntervalMS is how often runAgent emits an MCP
+// notifications/progress update while the child CLI runs. MCP hosts reset
+// per-request idle timers on progress updates (e.g. Qwen Code's
+// mcp.toolIdleTimeoutMs, default 300s); without updates, a run that outlasts
+// that wall is aborted by the host even when the bridge's own timeout_seconds
+// is larger. 15s sits comfortably below the smallest sane idle wall.
+const defaultProgressIntervalMS = 15000
+
+// progressIntervalEnv overrides the progress-report interval in milliseconds.
+// Values <= 0 disable reporting entirely; an unparseable value keeps the default.
+const progressIntervalEnv = "AGENT_BRIDGE_PROGRESS_INTERVAL_MS"
+
+func progressInterval() time.Duration {
+	if v, err := strconv.Atoi(os.Getenv(progressIntervalEnv)); err == nil {
+		if v <= 0 {
+			return 0
+		}
+		return time.Duration(v) * time.Millisecond
+	}
+	return defaultProgressIntervalMS * time.Millisecond
+}
+
+// startProgressReporter emits a notifications/progress update every
+// progressInterval while the backend child runs, and returns the stop func.
+// It is a no-op (no goroutine) unless the caller carried a progress token AND
+// a client session with a notification channel is available — hosts that never
+// send _meta.progressToken (most of them) see no behavior change.
+//
+// The Progress value is a monotonically increasing tick count (the MCP spec
+// asks that progress increase with every update); Message carries the elapsed
+// wall-clock so a host's progress UI shows the run is alive. The send is
+// non-blocking: a consumer that stops reading must never wedge the run.
+func startProgressReporter(ctx context.Context, session server.ClientSession, b backend, o runOpts) func() {
+	interval := progressInterval()
+	if interval <= 0 || o.progressToken == nil || session == nil {
+		return func() {}
+	}
+	counter := o.progressCounter
+	if counter == nil {
+		counter = &atomic.Int64{}
+	}
+	start := time.Now()
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				msg := fmt.Sprintf("%s running: %s elapsed", b.tool, time.Since(start).Round(time.Second))
+				// NotificationParams.AdditionalFields merges into the JSON
+				// "params" object (see its MarshalJSON), which is how the
+				// progressToken/progress/message fields reach the wire.
+				params := mcp.NotificationParams{AdditionalFields: map[string]any{
+					"progressToken": o.progressToken,
+					"progress":      float64(counter.Add(1)),
+					"message":       msg,
+				}}
+				select {
+				case session.NotificationChannel() <- mcp.JSONRPCNotification{
+					JSONRPC: "2.0",
+					Notification: mcp.Notification{
+						Method: string(mcp.MethodNotificationProgress),
+						Params: params,
+					},
+				}:
+				default:
+				}
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
 // runAgent is the shared backend run path: hop guard, command construction,
 // timeout/context handling, truncation, and header formatting. Tool-level
 // failures (timeout, child error, hop limit) are encoded as MCP error results
@@ -1318,6 +1414,12 @@ func runAgent(ctx context.Context, b backend, o runOpts) (*mcp.CallToolResult, e
 	hardDeadline := time.Duration(effectiveTimeout)*time.Second + b.timeoutHeadroom
 	runCtx, cancel := context.WithTimeout(ctx, hardDeadline)
 	defer cancel()
+
+	// Emit MCP progress updates while the child runs so hosts that reset idle
+	// timers on progress (Qwen Code's mcp.toolIdleTimeoutMs) don't abort a run
+	// that is still inside the bridge's own deadline.
+	stopProgress := startProgressReporter(runCtx, server.ClientSessionFromContext(ctx), b, o)
+	defer stopProgress()
 
 	cmd := exec.CommandContext(runCtx, b.resolveBin(), args...)
 	if strings.TrimSpace(o.workingDir) != "" {
